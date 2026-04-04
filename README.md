@@ -1,28 +1,42 @@
 # SSH Proxy Server
 
 A transparent SSH proxy server written in Go for bastion-style access and session capture.
-It accepts SSH connections with public key authentication, forwards authentication to the destination using the client's SSH agent, routes sessions via `LC_SSH_SERVER=user@host:port`, and records activity in asciinema v2 format.
+It accepts SSH connections with public key authentication, reuses the client's SSH agent to authenticate to the destination, routes sessions via `LC_SSH_SERVER=user@host[:port]`, and records activity in asciinema v2 format.
 
 **Core capabilities:**
-- Accepts SSH client connections with public key authentication
-- Uses the client's SSH agent to authenticate to the target host
-- Routes sessions using `LC_SSH_SERVER=user@host:port`
-- Records all sessions in asciinema v2 format
+- Accepts inbound SSH connections with public key authentication
+- Reuses the client's SSH agent to authenticate to the target host
+- Routes sessions using `LC_SSH_SERVER=user@host[:port]` and defaults to port `22`
+- Records shell and exec sessions in asciinema v2 format
 
 **→ [Quick Start Guide](QUICKSTART.md) for immediate setup**
 
 ## Features
 
-- **SSH Agent Forwarding**: Reuses the user's SSH key via `ssh -A` / `SSH_AUTH_SOCK`
-- **Session Recording**: All sessions recorded in asciinema format with contextual filenames
-- **Dynamic Routing via SendEnv**: Target host specified with `LC_SSH_SERVER=user@host:port`
+- **SSH Agent Reuse**: Uses a forwarded agent when available and falls back to `SSH_AUTH_SOCK`
+- **Session Recording**: Records proxied activity in asciinema format with contextual filenames
+- **Dynamic Routing via SendEnv**: Target host specified with `LC_SSH_SERVER=user@host[:port]`
 - **Transparent Proxying**: Acts as an intermediate SSH server and opens a real target SSH session
+- **Host Key Verification**: Uses `~/.ssh/known_hosts` when available
 - **Configurable Logging**: Supports `error`, `info`, and `debug` log levels
+
+## Requirements
+
+- Go `1.21+` to build the project
+- A reachable target SSH host
+- A loaded SSH agent or agent forwarding via `ssh -A`
+- Your public key present in the target host's `authorized_keys`
 
 ## Build
 
 ```bash
 go build -o ssh-proxy-server ./cmd/ssh-proxy-server
+```
+
+## Test
+
+```bash
+go test ./...
 ```
 
 ## Usage
@@ -49,9 +63,10 @@ The proxy requires the target host to be specified via the `LC_SSH_SERVER` envir
 Use `ssh -A` so the proxy can authenticate to the target with your SSH agent:
 
 ```bash
-LC_SSH_SERVER="user@target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost
+LC_SSH_SERVER="user@target-host[:port]" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost
 ```
 
+If `:port` is omitted, the proxy uses the default SSH port `22`.
 The proxy receives `LC_SSH_SERVER`, extracts `user`, `host`, and `port`, and opens the target SSH session accordingly.
 
 **Note**: Direct connection without `LC_SSH_SERVER` will fail with "Error: LC_SSH_SERVER not provided"
@@ -66,18 +81,6 @@ The proxy receives `LC_SSH_SERVER`, extracts `user`, `host`, and `port`, and ope
 
 # Connect with target specified via LC_SSH_SERVER
 LC_SSH_SERVER="ubuntu@192.168.1.100:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost
-```
-
-### Example 2: Multiple proxy instances
-
-```bash
-# Start multiple proxy instances on different ports
-./ssh-proxy-server -listen localhost:2222 -key ./ssh_key_1 -log-level info -recordings-dir ./recordings/proxy1 &
-./ssh-proxy-server -listen localhost:2223 -key ./ssh_key_2 -log-level info -recordings-dir ./recordings/proxy2 &
-
-# Connect to different targets via SendEnv
-LC_SSH_SERVER="user1@host1:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost
-LC_SSH_SERVER="user2@host2:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2223 localhost
 ```
 
 ## Troubleshooting
@@ -131,9 +134,8 @@ internal/
 
 ## Dependencies
 
-- `golang.org/x/crypto/ssh` - SSH protocol implementation
-- `golang.org/x/term` - Terminal operations
-- `github.com/google/uuid` - Session ID generation
+- `golang.org/x/crypto/ssh` - SSH protocol implementation and agent/known_hosts support
+- `github.com/google/uuid` - Session and recording ID generation
 
 ## Documentation
 
