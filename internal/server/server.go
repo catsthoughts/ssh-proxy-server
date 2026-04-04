@@ -56,7 +56,7 @@ func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir string) {
 	}
 
 	// Handle global requests (like env variables)
-	go handleGlobalRequests(reqs, sshConn, state)
+	go handleGlobalRequests(reqs, state)
 
 	// Handle channels
 	for newChannel := range chans {
@@ -75,7 +75,7 @@ func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir string) {
 	}
 }
 
-func handleGlobalRequests(requests <-chan *ssh.Request, conn *ssh.ServerConn, state *types.SessionState) {
+func handleGlobalRequests(requests <-chan *ssh.Request, state *types.SessionState) {
 	for req := range requests {
 		switch req.Type {
 		case "env":
