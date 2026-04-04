@@ -1,6 +1,9 @@
 # SSH Proxy Server
 
-A Go-based SSH proxy server that:
+A transparent SSH proxy server written in Go for bastion-style access and session capture.
+It accepts SSH connections with public key authentication, forwards authentication to the destination using the client's SSH agent, routes sessions via `LC_SSH_SERVER=user@host:port`, and records activity in asciinema v2 format.
+
+**Core capabilities:**
 - Accepts SSH client connections with public key authentication
 - Uses the client's SSH agent to authenticate to the target host
 - Routes sessions using `LC_SSH_SERVER=user@host:port`
