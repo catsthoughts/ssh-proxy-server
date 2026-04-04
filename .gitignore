@@ -1,0 +1,35 @@
+# macOS
+.DS_Store
+
+# Editors / IDEs
+.vscode/
+.idea/
+
+# Repository metadata
+.github/
+
+# Keep source directories tracked
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+
+# Go build artifacts
+bin/
+build/
+dist/
+*.test
+*.out
+coverage.out
+/ssh-proxy-server
+
+# Runtime data and temp files
+/recordings/
+/.tmp/
+*.log
+
+# Local SSH keys / secrets
+/ssh_host_key
+/ssh_host_key.pub
+/test_key
+/test_key.pub
