@@ -19,7 +19,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir string) {
+func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir, authorizedKeysPath string, autoAcceptClientKeys bool) {
 	defer conn.Close()
 
 	var clientKey ssh.PublicKey
@@ -27,9 +27,14 @@ func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir string) {
 	// Setup SSH server config
 	config := &ssh.ServerConfig{
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			if err := isAuthorizedClientKey(key, authorizedKeysPath, autoAcceptClientKeys); err != nil {
+				types.LogInfo("Rejected public key for %s from %s: %v", conn.User(), conn.RemoteAddr(), err)
+				return nil, err
+			}
+
 			// Store the key for forwarding to target host
 			clientKey = key
-			types.LogDebug("Auth attempt from %s with key %s", conn.User(), key.Type())
+			types.LogDebug("Accepted auth for %s with key %s (%s)", conn.User(), key.Type(), ssh.FingerprintSHA256(key))
 			return &ssh.Permissions{}, nil
 		},
 		NoClientAuth: false,
@@ -228,19 +233,19 @@ func handleEnvRequest(req *ssh.Request, state *types.SessionState) {
 	// Parse environment variable from request payload
 	// Format: uint32 name_len | name | uint32 value_len | value
 	payload := req.Payload
-	
+
 	if len(payload) < 8 {
 		req.Reply(false, nil)
 		return
 	}
-	
+
 	nameLen := binary.BigEndian.Uint32(payload[0:4])
 	if int(nameLen) > len(payload)-8 {
 		req.Reply(false, nil)
 		return
 	}
 	varName := string(payload[4 : 4+nameLen])
-	
+
 	valueLen := binary.BigEndian.Uint32(payload[4+nameLen : 8+nameLen])
 	if int(valueLen) > len(payload)-int(8+nameLen) {
 		req.Reply(false, nil)
@@ -248,9 +253,9 @@ func handleEnvRequest(req *ssh.Request, state *types.SessionState) {
 	}
 	varValue := string(payload[8+nameLen : 8+nameLen+valueLen])
 	state.EnvVars[varName] = varValue
-	
+
 	types.LogDebug("Received environment variable: %s=%s", varName, varValue)
-	
+
 	if varName == "LC_SSH_SERVER" {
 		targetUser, targetHost, targetPort, err := splitTargetAddress(varValue)
 		if err != nil {
@@ -262,7 +267,7 @@ func handleEnvRequest(req *ssh.Request, state *types.SessionState) {
 			types.LogInfo("Target parsed from LC_SSH_SERVER: user=%s host=%s port=%s", targetUser, targetHost, targetPort)
 		}
 	}
-	
+
 	req.Reply(true, nil)
 }
 
@@ -282,7 +287,12 @@ func proxySession(channel ssh.Channel, state *types.SessionState, targetAddr, co
 		recordingsDir = "recordings"
 	}
 	recordingPath := filepath.Join(recordingsDir, recordingFileName)
-	os.MkdirAll(recordingsDir, 0755)
+	if err := os.MkdirAll(recordingsDir, 0o700); err != nil {
+		return fmt.Errorf("failed to create recordings directory: %w", err)
+	}
+	if err := os.Chmod(recordingsDir, 0o700); err != nil {
+		return fmt.Errorf("failed to secure recordings directory permissions: %w", err)
+	}
 
 	state.Recorder = recording.NewAsciinemaRecorder(recordingPath)
 	defer state.Recorder.Close()

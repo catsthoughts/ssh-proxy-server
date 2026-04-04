@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,16 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
+
+const (
+	allowLocalAgentFallbackEnv = "SSH_PROXY_ALLOW_LOCAL_AGENT_FALLBACK"
+	insecureIgnoreHostKeyEnv   = "SSH_PROXY_INSECURE_IGNORE_HOSTKEY"
+)
+
+func envEnabled(name string) bool {
+	value := strings.TrimSpace(os.Getenv(name))
+	return value == "1" || strings.EqualFold(value, "true") || strings.EqualFold(value, "yes")
+}
 
 // ConnectToTarget establishes an SSH connection to the target host
 // using the user's SSH agent according to the SSH agent forwarding protocol.
@@ -86,8 +97,12 @@ func getHostKeyCallback() (ssh.HostKeyCallback, error) {
 		return callback, nil
 	}
 
-	types.LogInfo("known_hosts is unavailable; using insecure host key verification for this session")
-	return ssh.InsecureIgnoreHostKey(), nil
+	if envEnabled(insecureIgnoreHostKeyEnv) {
+		types.LogInfo("WARNING: insecure host key verification enabled because %s is set", insecureIgnoreHostKeyEnv)
+		return ssh.InsecureIgnoreHostKey(), nil
+	}
+
+	return nil, fmt.Errorf("known_hosts is required at %s for target verification (set %s=1 only for temporary development use): %w", knownHostsPath, insecureIgnoreHostKeyEnv, err)
 }
 
 // ProxyWithKeyForwarding handles the proxying with key information.
@@ -156,7 +171,8 @@ func BidiProxy(clientChan io.ReadWriteCloser, targetChan io.ReadWriteCloser, rec
 	return err2
 }
 
-// GetSSHAgentConn gets a connection to a forwarded SSH agent or the local SSH agent.
+// GetSSHAgentConn gets a connection to a forwarded SSH agent or, when explicitly enabled,
+// the local SSH agent for development-only use.
 func GetSSHAgentConn(state *types.SessionState) (agent.Agent, error) {
 	if state != nil && state.AgentRequested && state.ClientConn != nil {
 		agentChannel, requests, err := state.ClientConn.OpenChannel("auth-agent@openssh.com", nil)
@@ -164,6 +180,13 @@ func GetSSHAgentConn(state *types.SessionState) (agent.Agent, error) {
 			go ssh.DiscardRequests(requests)
 			return agent.NewClient(agentChannel), nil
 		}
+		if !envEnabled(allowLocalAgentFallbackEnv) {
+			return nil, fmt.Errorf("forwarded SSH agent could not be opened: %w", err)
+		}
+	}
+
+	if !envEnabled(allowLocalAgentFallbackEnv) {
+		return nil, fmt.Errorf("SSH agent forwarding is required; connect with ssh -A (set %s=1 only for temporary development use)", allowLocalAgentFallbackEnv)
 	}
 
 	agentSocket := os.Getenv("SSH_AUTH_SOCK")

@@ -2,6 +2,7 @@ package recording
 
 import (
 	"encoding/json"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -19,26 +20,27 @@ type AsciinemaRecorder struct {
 
 // AsciinemaHeader represents the JSON header for asciinema v2 format
 type AsciinemaHeader struct {
-	Version   int                   `json:"version"`
-	Width     int                   `json:"width"`
-	Height    int                   `json:"height"`
-	Timestamp int64                 `json:"timestamp"`
-	Command   string                `json:"command,omitempty"`
-	Title     string                `json:"title,omitempty"`
+	Version   int                    `json:"version"`
+	Width     int                    `json:"width"`
+	Height    int                    `json:"height"`
+	Timestamp int64                  `json:"timestamp"`
+	Command   string                 `json:"command,omitempty"`
+	Title     string                 `json:"title,omitempty"`
 	Metadata  map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // AsciinemaFrame represents a single frame in the recording
 type AsciinemaFrame struct {
-	Time   float64 `json:"time"`
-	Type   string  `json:"type"`
-	Data   string  `json:"data"`
+	Time float64 `json:"time"`
+	Type string  `json:"type"`
+	Data string  `json:"data"`
 }
 
 // NewAsciinemaRecorder creates a new asciinema recorder
 func NewAsciinemaRecorder(filePath string) *AsciinemaRecorder {
-	file, err := os.Create(filePath)
+	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
+		log.Printf("Failed to create recording file %s: %v", filePath, err)
 		return &AsciinemaRecorder{enabled: false}
 	}
 
