@@ -2,7 +2,7 @@
 
 ## Overview
 
-SSH proxy server with dynamic target routing via `LC_SSH_SERVER`, SSH agent-based target authentication, session recording, clean shutdown handling, and terminal resize forwarding. Interactive terminal sessions are enabled by default; direct commands require `-allow-direct-commands`.
+SSH proxy server with dynamic target routing via `LC_SSH_SERVER`, SSH agent-based target authentication, session recording, clean shutdown handling, terminal resize forwarding, and config-driven startup via `-config`. Interactive terminal sessions are enabled by default; direct commands require `allow_direct_commands` in the JSON config.
 
 ## What Was Implemented
 
@@ -10,7 +10,7 @@ SSH proxy server with dynamic target routing via `LC_SSH_SERVER`, SSH agent-base
 
 1. **SSH Server** (`server.go`)
    - Accepts SSH client connections with public key authentication
-   - Handles SSH channel requests (`shell`, `pty-req`, `window-change`, and `exec` when `-allow-direct-commands` is enabled)
+   - Handles SSH channel requests (`shell`, `pty-req`, `window-change`, and `exec` when `allow_direct_commands` is enabled in the JSON config)
    - **NEW: Handles SSH environment variables via `env` channel requests**
 
 2. **Dynamic Routing via SendEnv** ✅ NEW
@@ -34,7 +34,7 @@ SSH proxy server with dynamic target routing via `LC_SSH_SERVER`, SSH agent-base
    - Establishes a real outbound SSH connection to the target host
    - Reuses the client's SSH agent (`ssh -A` / `SSH_AUTH_SOCK`)
    - Prefers the same key that authenticated to the proxy
-   - Uses `known_hosts` by default, with an optional `-insecure-ignore-hostkey` startup override for development
+   - Uses `known_hosts` by default, with an optional `insecure_ignore_hostkey` config override for development
 
 ### Documentation
 
@@ -49,7 +49,7 @@ SSH proxy server with dynamic target routing via `LC_SSH_SERVER`, SSH agent-base
 
 ```bash
 # Start proxy server
-./ssh-proxy-server -listen localhost:2222 -key ./ssh_host_key -log-level info -recordings-dir ./recordings
+./ssh-proxy-server -config ./config.json
 
 # In another terminal, connect with target via SendEnv + agent forwarding
 LC_SSH_SERVER="user@target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost
@@ -62,7 +62,8 @@ LC_SSH_SERVER="user@target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 lo
 LC_SSH_SERVER="admin@server:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost
 
 # Development-only startup if known_hosts mismatches must be ignored temporarily
-./ssh-proxy-server -listen localhost:2222 -key ./ssh_host_key -log-level info -recordings-dir ./recordings -insecure-ignore-hostkey
+# Set "insecure_ignore_hostkey": true in config.json, then run:
+./ssh-proxy-server -config ./config.json
 
 # SSH config file
 cat >> ~/.ssh/config <<'EOF'
@@ -175,7 +176,8 @@ if targetAddr == "" {
 
 ```bash
 # Terminal 1: Start proxy
-./ssh-proxy-server -listen localhost:2222 -key ./ssh_host_key -log-level debug -recordings-dir ./recordings
+cp ./config.example.json ./config.json
+./ssh-proxy-server -config ./config.json
 
 # Terminal 2: Connect
 LC_SSH_SERVER="localhost@127.0.0.1:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost

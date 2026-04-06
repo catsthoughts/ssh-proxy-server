@@ -8,8 +8,16 @@ go build -o ssh-proxy-server ./cmd/ssh-proxy-server
 
 ## 2. Run the proxy
 
+Create a config file from the example:
+
 ```bash
-./ssh-proxy-server -listen localhost:2222 -key ./ssh_host_key -log-level info -recordings-dir ./recordings
+cp ./config.example.json ./config.json
+```
+
+Then start the proxy with the config file:
+
+```bash
+./ssh-proxy-server -config ./config.json
 ```
 
 Available log levels:
@@ -17,11 +25,13 @@ Available log levels:
 - `info`
 - `debug`
 
-> By default, the proxy allows **interactive terminal sessions only** and records sessions in `asciinema` format. To permit `ssh ... <command>` style execution, start it with `-allow-direct-commands`.
+> By default, the proxy allows **interactive terminal sessions only** and records sessions in `asciinema` format.
 >
-> If you want plain-text transcript files instead of `.cast`, start it with `-recording-format script`.
+> To permit `ssh ... <command>` style execution, set `"allow_direct_commands": true` in `config.json`.
 >
-> If the target host key changed and you are in a temporary development scenario, you can start the proxy with `-insecure-ignore-hostkey`.
+> If you want plain-text transcript files instead of `.cast`, set `"recording_format": "script"`.
+>
+> If the target host key changed and you are in a temporary development scenario, set `"insecure_ignore_hostkey": true`.
 
 ## 3. Connect through the proxy
 
@@ -40,26 +50,20 @@ Replace:
 
 ### Optional: enable direct commands
 
-If you want one-shot command execution, restart the proxy with `-allow-direct-commands` and then connect with a trailing command:
+If you want one-shot command execution, set `"allow_direct_commands": true` in `config.json`, restart the proxy, and then connect with a trailing command:
 
 ```bash
-./ssh-proxy-server -listen localhost:2222 -key ./ssh_host_key -log-level info -recordings-dir ./recordings -allow-direct-commands
+./ssh-proxy-server -config ./config.json
 LC_SSH_SERVER="user@target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost 'hostname'
 ```
 
 ### Optional: ignore target host key mismatches for development
 
-If you hit `knownhosts: key mismatch` and need a temporary dev-only workaround:
-
-```bash
-./ssh-proxy-server -listen localhost:2222 -key ./ssh_host_key -log-level info -recordings-dir ./recordings -insecure-ignore-hostkey
-```
+If you hit `knownhosts: key mismatch`, set `"insecure_ignore_hostkey": true` in `config.json` and restart the proxy.
 
 ### Optional: store recordings as plain `script` transcripts
 
-```bash
-./ssh-proxy-server -listen localhost:2222 -key ./ssh_host_key -log-level info -recordings-dir ./recordings -recording-format script
-```
+Set `"recording_format": "script"` in `config.json`.
 
 ## 4. Check recordings
 
@@ -69,7 +73,7 @@ If you use the default value, they appear in `recordings/`:
 ```bash
 ls -la recordings/
 asciinema play recordings/<user>_<host>_<port>_<session-id>.cast
-# or inspect plain-text script transcripts when -recording-format script is used
+# or inspect plain-text script transcripts when "recording_format": "script" is used
 cat recordings/<user>_<host>_<port>_<session-id>.log
 ```
 

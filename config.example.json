@@ -1,0 +1,11 @@
+{
+  "listen": "localhost:2222",
+  "key": "./ssh_host_key",
+  "log_level": "info",
+  "recordings_dir": "./recordings",
+  "authorized_keys": "/absolute/path/to/authorized_keys",
+  "auto_accept_client_keys": true,
+  "allow_direct_commands": false,
+  "insecure_ignore_hostkey": false,
+  "recording_format": "asciinema"
+}
