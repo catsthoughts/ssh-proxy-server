@@ -42,11 +42,16 @@ func ConnectToTarget(state *types.SessionState, targetUser, targetHost, targetPo
 		return nil, err
 	}
 
+	timeout := 10 * time.Second
+	if state != nil && state.ConnectTimeout > 0 {
+		timeout = state.ConnectTimeout
+	}
+
 	config := &ssh.ClientConfig{
 		User:            targetUser,
 		Auth:            []ssh.AuthMethod{authMethod},
 		HostKeyCallback: hostKeyCallback,
-		Timeout:         10 * time.Second,
+		Timeout:         timeout,
 	}
 
 	targetNetwork := net.JoinHostPort(targetHost, targetPort)

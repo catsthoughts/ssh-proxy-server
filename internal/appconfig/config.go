@@ -12,17 +12,30 @@ import (
 
 const insecureIgnoreHostKeyEnv = "SSH_PROXY_INSECURE_IGNORE_HOSTKEY"
 
+type StaticRoutingConfig struct {
+	Enabled bool     `json:"enabled"`
+	Servers []string `json:"servers"`
+	Mode    string   `json:"mode"`
+
+	// Deprecated: kept for backward compatibility with older configs.
+	Retries               int `json:"retries"`
+	ConnectTimeoutSeconds int `json:"connect_timeout_seconds"`
+}
+
 // Config holds the startup configuration loaded from JSON.
 type Config struct {
-	Listen                string `json:"listen"`
-	Key                   string `json:"key"`
-	LogLevel              string `json:"log_level"`
-	RecordingsDir         string `json:"recordings_dir"`
-	AuthorizedKeys        string `json:"authorized_keys"`
-	AutoAcceptClientKeys  bool   `json:"auto_accept_client_keys"`
-	AllowDirectCommands   bool   `json:"allow_direct_commands"`
-	InsecureIgnoreHostKey bool   `json:"insecure_ignore_hostkey"`
-	RecordingFormat       string `json:"recording_format"`
+	Listen                string              `json:"listen"`
+	Key                   string              `json:"key"`
+	LogLevel              string              `json:"log_level"`
+	RecordingsDir         string              `json:"recordings_dir"`
+	AuthorizedKeys        string              `json:"authorized_keys"`
+	AutoAcceptClientKeys  bool                `json:"auto_accept_client_keys"`
+	AllowDirectCommands   bool                `json:"allow_direct_commands"`
+	InsecureIgnoreHostKey bool                `json:"insecure_ignore_hostkey"`
+	RecordingFormat       string              `json:"recording_format"`
+	Retries               int                 `json:"retries"`
+	ConnectTimeoutSeconds int                 `json:"connect_timeout_seconds"`
+	StaticRouting         StaticRoutingConfig `json:"static_routing"`
 }
 
 // Default returns the default application configuration.
@@ -37,6 +50,13 @@ func Default() Config {
 		AllowDirectCommands:   false,
 		InsecureIgnoreHostKey: envBool(insecureIgnoreHostKeyEnv, false),
 		RecordingFormat:       recording.FormatAsciinema,
+		Retries:               0,
+		ConnectTimeoutSeconds: server.DefaultConnectTimeoutSeconds,
+		StaticRouting: StaticRoutingConfig{
+			Enabled: false,
+			Servers: nil,
+			Mode:    server.RoutingModeFailover,
+		},
 	}
 }
 
@@ -51,12 +71,19 @@ func Load(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to read config %s: %w", configPath, err)
 	}
 
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("failed to parse config %s: %w", configPath, err)
+	}
+
 	cfg := Default()
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config %s: %w", configPath, err)
 	}
 
 	cfg.RecordingFormat = recording.NormalizeFormat(cfg.RecordingFormat)
+	cfg.StaticRouting.Mode = server.NormalizeRoutingMode(cfg.StaticRouting.Mode)
+	cfg.applyLegacyRoutingFallbacks(raw)
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config %s: %w", configPath, err)
 	}
@@ -92,8 +119,41 @@ func (c *Config) Validate() error {
 	if !recording.IsSupportedFormat(c.RecordingFormat) {
 		return fmt.Errorf("recording format must be %q or %q", recording.FormatAsciinema, recording.FormatScript)
 	}
+	if c.Retries < 0 {
+		return fmt.Errorf("retries must be greater than or equal to 0")
+	}
+	if c.ConnectTimeoutSeconds <= 0 {
+		c.ConnectTimeoutSeconds = server.DefaultConnectTimeoutSeconds
+	}
+
+	c.StaticRouting.Mode = server.NormalizeRoutingMode(c.StaticRouting.Mode)
+	if !server.IsSupportedRoutingMode(c.StaticRouting.Mode) {
+		return fmt.Errorf("static_routing.mode must be %q or %q", server.RoutingModeFailover, server.RoutingModeRoundRobin)
+	}
+	for i, target := range c.StaticRouting.Servers {
+		target = strings.TrimSpace(target)
+		if target == "" {
+			return fmt.Errorf("static_routing.servers[%d] is empty", i)
+		}
+		if err := server.ValidateTargetAddress(target); err != nil {
+			return fmt.Errorf("static_routing.servers[%d] is invalid: %w", i, err)
+		}
+		c.StaticRouting.Servers[i] = target
+	}
+	if c.StaticRouting.Enabled && len(c.StaticRouting.Servers) == 0 {
+		return fmt.Errorf("static_routing.servers must contain at least one target when static routing is enabled")
+	}
 
 	return nil
+}
+
+func (c *Config) applyLegacyRoutingFallbacks(raw map[string]json.RawMessage) {
+	if _, ok := raw["retries"]; !ok && c.StaticRouting.Retries > 0 {
+		c.Retries = c.StaticRouting.Retries
+	}
+	if _, ok := raw["connect_timeout_seconds"]; !ok && c.StaticRouting.ConnectTimeoutSeconds > 0 {
+		c.ConnectTimeoutSeconds = c.StaticRouting.ConnectTimeoutSeconds
+	}
 }
 
 func envBool(name string, defaultValue bool) bool {

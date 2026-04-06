@@ -5,7 +5,7 @@
 The project is a working Go-based SSH proxy for bastion-style access, auditing, and session capture. It currently:
 
 1. accepts inbound SSH connections with public key authentication
-2. routes sessions using `LC_SSH_SERVER=user@host[:port]`
+2. routes sessions using `LC_SSH_SERVER=host[:port]` and reuses the SSH session user for the target login by default
 3. proxies interactive `shell` sessions by default and enables `exec` commands only when `allow_direct_commands` is set in the JSON config
 4. authenticates to the target host using the client's SSH agent
 5. records full session input/output in either `asciinema` v2 or plain `script` transcript format
@@ -19,7 +19,7 @@ The project is a working Go-based SSH proxy for bastion-style access, auditing, 
 ```text
 SSH client
   │
-  │ LC_SSH_SERVER="user@host[:port]" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost
+  │ LC_SSH_SERVER="host[:port]" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 your-user@localhost
   ▼
 SSH proxy server
   ├─ authenticates the incoming client
@@ -141,13 +141,13 @@ Holds shared state for an active session, including:
 The proxy expects the destination to be provided as:
 
 ```text
-LC_SSH_SERVER=user@host[:port]
+LC_SSH_SERVER=host[:port]
 ```
 
 Example:
 
 ```bash
-LC_SSH_SERVER="ubuntu@192.168.1.100:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost
+LC_SSH_SERVER="target-host.example.com:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 your-user@localhost
 ```
 
 ### Parsing behavior
@@ -344,7 +344,7 @@ cp ./config.example.json ./config.json
 ### Connect
 
 ```bash
-LC_SSH_SERVER="user@target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost
+LC_SSH_SERVER="target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 your-user@localhost
 ```
 
 ---

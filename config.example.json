@@ -7,5 +7,15 @@
   "auto_accept_client_keys": true,
   "allow_direct_commands": false,
   "insecure_ignore_hostkey": false,
-  "recording_format": "asciinema"
+  "recording_format": "asciinema",
+  "retries": 0,
+  "connect_timeout_seconds": 10,
+  "static_routing": {
+    "enabled": false,
+    "servers": [
+      "primary-target:22",
+      "backup-target:22"
+    ],
+    "mode": "failover"
+  }
 }

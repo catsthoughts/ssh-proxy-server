@@ -1,12 +1,12 @@
 # SSH Proxy Server
 
 A transparent SSH proxy server written in Go for bastion-style access, SSH session auditing, and controlled target routing.
-It accepts SSH connections with public key authentication, can either auto-accept client keys or validate them against an `authorized_keys` file, reuses the client's SSH agent to authenticate to the destination, routes sessions via `LC_SSH_SERVER=user@host[:port]`, and records activity either in `asciinema` v2 or in a plain `script`-style transcript. All startup settings are loaded from a JSON config file passed via `-config`.
+It accepts SSH connections with public key authentication, can either auto-accept client keys or validate them against an `authorized_keys` file, reuses the client's SSH agent to authenticate to the destination, supports either dynamic routing via `LC_SSH_SERVER=host[:port]` or static routing through a fixed server list with failover / retries / round-robin, and uses the authenticated SSH session user for the final target login by default. All startup settings are loaded from a JSON config file passed via `-config`.
 
 **Core capabilities:**
 - Accepts inbound SSH connections with configurable client-key policy via `auto_accept_client_keys` and `authorized_keys` in the JSON config
 - Reuses the client's forwarded SSH agent to authenticate to the target host
-- Routes sessions using `LC_SSH_SERVER=user@host[:port]` and defaults to port `22`
+- Routes sessions dynamically with `LC_SSH_SERVER=host[:port]` or statically through a fixed target list with failover and round-robin
 - Records interactive shell sessions in either `asciinema` or plain `script` transcript format for audit and analysis
 - Can optionally allow direct command execution with `"allow_direct_commands": true` in the JSON config
 
@@ -18,7 +18,7 @@ It accepts SSH connections with public key authentication, can either auto-accep
 - **SSH Agent Reuse**: Requires forwarded agent access via `ssh -A` by default
 - **Session Recording**: Records proxied terminal activity in either `asciinema` (`.cast`) or plain `script` transcript (`.log`) format with private file permissions for audit and analysis
 - **Terminal-Only by Default**: Accepts interactive `shell` sessions out of the box; direct `exec` requests stay disabled unless `allow_direct_commands` is enabled in the JSON config
-- **Dynamic Routing via SendEnv**: Target host specified with `LC_SSH_SERVER=user@host[:port]`
+- **Dynamic or Static Routing**: Use `LC_SSH_SERVER=host[:port]` or enable `static_routing` with failover / round-robin
 - **Transparent Proxying**: Acts as an intermediate SSH server and opens a real target SSH session
 - **Host Key Verification**: Requires `~/.ssh/known_hosts` by default, with an explicit insecure override for development only via `insecure_ignore_hostkey` in the JSON config
 - **Configurable Logging**: Supports `error`, `info`, and `debug` log levels
@@ -66,7 +66,17 @@ Example `config.json`:
   "auto_accept_client_keys": true,
   "allow_direct_commands": false,
   "insecure_ignore_hostkey": false,
-  "recording_format": "asciinema"
+  "recording_format": "asciinema",
+  "retries": 0,
+  "connect_timeout_seconds": 10,
+  "static_routing": {
+    "enabled": false,
+    "servers": [
+      "primary-target:22",
+      "backup-target:22"
+    ],
+    "mode": "failover"
+  }
 }
 ```
 
@@ -84,24 +94,54 @@ Key JSON settings:
 - `allow_direct_commands` — defaults to `false`; keeps the proxy in terminal-only mode unless enabled
 - `recording_format` — `asciinema` by default; set to `script` for a plain-text transcript file
 - `insecure_ignore_hostkey` — defaults to `false`; enable only for temporary development use when you need to ignore `known_hosts` mismatches or missing entries
+- `retries` and `connect_timeout_seconds` — global target connection retry/timeout settings for both dynamic and static routing
+- `static_routing.enabled` — when `true`, the proxy ignores `LC_SSH_SERVER` and uses the configured `servers` list
+- `static_routing.mode` — `failover` or `round_robin`
 
 You can store recordings in a custom directory by setting `"recordings_dir": "/path/to/recordings"` in the JSON config.
 
 ### Connect through the proxy
 
-**Required: Using SendEnv to specify target**
+**Dynamic routing: Using SendEnv to specify target**
 
-The proxy requires the target host to be specified via the `LC_SSH_SERVER` environment variable using SSH's SendEnv option.
-Use `ssh -A` so the proxy can authenticate to the target with your SSH agent. By default, the proxy rejects local-agent fallback and requires a forwarded agent:
+When `static_routing.enabled` is `false`, the proxy requires the target host to be specified via the `LC_SSH_SERVER` environment variable using SSH's SendEnv option.
+Use `ssh -A` so the proxy can authenticate to the target with your SSH agent. The username from the SSH session to the proxy is reused for the final target login unless you still provide a legacy `user@host[:port]` route. By default, the proxy rejects local-agent fallback and requires a forwarded agent:
 
 ```bash
-LC_SSH_SERVER="user@target-host[:port]" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost
+LC_SSH_SERVER="target-host[:port]" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 your-user@localhost
 ```
 
 If `:port` is omitted, the proxy uses the default SSH port `22`.
-The proxy receives `LC_SSH_SERVER`, validates it, extracts `user`, `host`, and `port`, and opens the target SSH session accordingly. Suspicious values with shell metacharacters or invalid host/port parts are rejected and logged.
+The proxy receives `LC_SSH_SERVER`, validates it, extracts `host` and `port`, and uses the authenticated SSH username from the proxy session as the target user when the route omits one. Suspicious values with shell metacharacters or invalid host/port parts are rejected and logged.
 
-**Note**: Direct connection without `LC_SSH_SERVER` will fail with "Error: LC_SSH_SERVER not provided"
+**Note**: In dynamic-routing mode, connecting without `LC_SSH_SERVER` will fail with `Error: LC_SSH_SERVER not provided`.
+
+### Optional: enable static routing with failover or round-robin
+
+If you want the proxy to choose from a fixed list of targets, enable `static_routing` in `config.json`. In this mode, `LC_SSH_SERVER` becomes optional and is ignored.
+
+```json
+{
+  "retries": 1,
+  "connect_timeout_seconds": 5,
+  "static_routing": {
+    "enabled": true,
+    "servers": [
+      "primary-target:22",
+      "backup-target:22"
+    ],
+    "mode": "round_robin"
+  }
+}
+```
+
+Then connect normally:
+
+```bash
+ssh -A -p 2222 your-user@localhost
+```
+
+The proxy will try the configured servers in order, move to the next one when a target is unavailable, and rotate the starting target per session when `mode` is `round_robin`. The global `retries` and `connect_timeout_seconds` values apply here too.
 
 ### Optional: enable direct command execution
 
@@ -117,7 +157,7 @@ Then connect with a trailing command:
 
 ```bash
 ./ssh-proxy-server -config ./config.json
-LC_SSH_SERVER="user@target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost 'uname -a'
+LC_SSH_SERVER="target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 your-user@localhost 'uname -a'
 ```
 
 ## Examples
@@ -129,7 +169,7 @@ LC_SSH_SERVER="user@target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 lo
 ./ssh-proxy-server -config ./config.json
 
 # Connect with target specified via LC_SSH_SERVER
-LC_SSH_SERVER="ubuntu@192.168.1.100:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost
+LC_SSH_SERVER="target-host.example.com:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 your-user@localhost
 ```
 
 ## Troubleshooting
@@ -141,7 +181,7 @@ LC_SSH_SERVER="ubuntu@192.168.1.100:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 222
 **Solution**: Always use the SendEnv option when connecting and enable agent forwarding:
 
 ```bash
-LC_SSH_SERVER="user@target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost
+LC_SSH_SERVER="target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 your-user@localhost
 ```
 
 ### "Error: direct commands are disabled"
@@ -171,7 +211,7 @@ ssh your-user@target-host.example.com
 - Ensure your client key is present in the proxy host's `authorized_keys` or in the file referenced by `authorized_keys` in `config.json`
 - Ensure your SSH key is added to the target host's `authorized_keys`
 - Make sure your key is loaded in `ssh-agent` and connect with `ssh -A`
-- Verify the target host address format: `user@host[:port]`
+- Verify the target host address format: `host[:port]` (or legacy `user@host[:port]`)
 - Check that the target SSH server is running and accessible
 
 ### Security configuration options
