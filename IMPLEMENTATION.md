@@ -244,8 +244,8 @@ On clean termination:
 
 ## Recording implementation
 
-Recordings are written as asciinema v2 `.cast` files under the directory configured by `-recordings-dir`.
-If the flag is omitted, the default directory is `./recordings/`.
+Recordings are written under the directory configured by `recordings_dir` in the JSON config.
+If that setting is omitted, the default directory is `./recordings/`.
 
 ### Permissions
 

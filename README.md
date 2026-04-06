@@ -62,7 +62,7 @@ Example `config.json`:
   "key": "./ssh_host_key",
   "log_level": "info",
   "recordings_dir": "./recordings",
-  "authorized_keys": "/absolute/path/to/authorized_keys",
+  "authorized_keys": "./authorized_keys",
   "auto_accept_client_keys": true,
   "allow_direct_commands": false,
   "insecure_ignore_hostkey": false,
@@ -79,6 +79,7 @@ Start the proxy with the config file:
 Available log levels: `error`, `info`, `debug`
 
 Key JSON settings:
+- `authorized_keys` — by default you can use a local path like `./authorized_keys`
 - `auto_accept_client_keys` — defaults to `true`; set to `false` to enforce checking `authorized_keys`
 - `allow_direct_commands` — defaults to `false`; keeps the proxy in terminal-only mode unless enabled
 - `recording_format` — `asciinema` by default; set to `script` for a plain-text transcript file

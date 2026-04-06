@@ -14,6 +14,8 @@ Create a config file from the example:
 cp ./config.example.json ./config.json
 ```
 
+By default, the example uses a local `./authorized_keys` path, so make sure that file exists if you disable auto-accept.
+
 Then start the proxy with the config file:
 
 ```bash
@@ -67,7 +69,7 @@ Set `"recording_format": "script"` in `config.json`.
 
 ## 4. Check recordings
 
-Sessions are saved to the directory passed with `-recordings-dir`.
+Sessions are saved to the directory configured by `"recordings_dir"` in `config.json`.
 If you use the default value, they appear in `recordings/`:
 
 ```bash
@@ -107,7 +109,7 @@ LC_SSH_SERVER="user@target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 lo
 2. SSH sends it to the proxy via `SendEnv`
 3. The proxy parses `user`, `host`, and `port`
 4. The proxy authenticates to the target with your SSH agent
-5. Input/output is recorded in asciinema v2 format
+5. Input/output is recorded in the configured format (`asciinema` by default, or `script` if selected)
 
 ## More information
 

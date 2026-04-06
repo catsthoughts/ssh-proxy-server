@@ -24,11 +24,13 @@ coverage.out
 /ssh-proxy-server
 
 # Runtime data and temp files
+/config.json
 /recordings/
 /.tmp/
 *.log
 
 # Local SSH keys / secrets
+/authorized_keys
 /ssh_host_key
 /ssh_host_key.pub
 /test_key
