@@ -261,3 +261,33 @@ func TestLoadRejectsUnsupportedSSOProvider(t *testing.T) {
 		t.Fatalf("expected sso.provider validation error, got %q", err.Error())
 	}
 }
+
+func TestLoadAppliesMetricsSettings(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	configJSON := `{
+		"metrics": {
+			"enabled": true,
+			"listen": "127.0.0.1:9090",
+			"path": "/metrics"
+		}
+	}`
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatalf("WriteFile() returned error: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	if !cfg.Metrics.Enabled {
+		t.Fatal("expected Metrics.Enabled to be true")
+	}
+	if cfg.Metrics.Listen != "127.0.0.1:9090" {
+		t.Fatalf("Metrics.Listen = %q, want %q", cfg.Metrics.Listen, "127.0.0.1:9090")
+	}
+	if cfg.Metrics.Path != "/metrics" {
+		t.Fatalf("Metrics.Path = %q, want %q", cfg.Metrics.Path, "/metrics")
+	}
+}

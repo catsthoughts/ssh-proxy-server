@@ -4,11 +4,13 @@ import (
 	"flag"
 	"log"
 	"net"
+	"net/http"
 	"strings"
 	"time"
 
 	"ssh-proxy-server/internal/appconfig"
 	"ssh-proxy-server/internal/hostkey"
+	appmetrics "ssh-proxy-server/internal/metrics"
 	"ssh-proxy-server/internal/server"
 	"ssh-proxy-server/internal/types"
 )
@@ -57,6 +59,11 @@ func main() {
 	} else {
 		types.LogInfo("SSO second factor is disabled")
 	}
+	if cfg.Metrics.Enabled {
+		types.LogInfo("Prometheus metrics enabled: listen=%s path=%s", cfg.Metrics.Listen, cfg.Metrics.Path)
+	} else {
+		types.LogInfo("Prometheus metrics are disabled")
+	}
 
 	routingConfig := server.RoutingConfig{
 		StaticEnabled:  cfg.StaticRouting.Enabled,
@@ -82,6 +89,21 @@ func main() {
 	hostKey, err := hostkey.LoadOrGenerateHostKey(cfg.Key)
 	if err != nil {
 		log.Fatalf("Failed to load/generate host key: %v", err)
+	}
+
+	if cfg.Metrics.Enabled {
+		metricsMux := http.NewServeMux()
+		metricsMux.Handle(cfg.Metrics.Path, appmetrics.Default().Handler())
+		metricsListener, err := net.Listen("tcp", cfg.Metrics.Listen)
+		if err != nil {
+			log.Fatalf("Failed to listen for Prometheus metrics on %s: %v", cfg.Metrics.Listen, err)
+		}
+		defer metricsListener.Close()
+		go func() {
+			if err := http.Serve(metricsListener, metricsMux); err != nil {
+				log.Printf("Prometheus metrics server stopped: %v", err)
+			}
+		}()
 	}
 
 	listener, err := net.Listen("tcp", cfg.Listen)

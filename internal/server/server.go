@@ -17,6 +17,7 @@ import (
 	"unicode"
 
 	proxyclient "ssh-proxy-server/internal/client"
+	appmetrics "ssh-proxy-server/internal/metrics"
 	"ssh-proxy-server/internal/recording"
 	"ssh-proxy-server/internal/sso"
 	"ssh-proxy-server/internal/types"
@@ -107,10 +108,13 @@ func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir, authoriz
 	// Perform SSH handshake
 	sshConn, chans, reqs, err := ssh.NewServerConn(conn, config)
 	if err != nil {
+		appmetrics.Default().RecordSSHHandshakeFailure()
 		log.Printf("Failed to establish SSH connection: %v", err)
 		return
 	}
 	defer sshConn.Close()
+	appmetrics.Default().SSHConnectionOpened()
+	defer appmetrics.Default().SSHConnectionClosed()
 
 	types.LogInfo("New SSH connection from %s (%s)", sshConn.RemoteAddr(), sshConn.ClientVersion())
 
@@ -297,6 +301,7 @@ func handleChannel(channel ssh.Channel, requests <-chan *ssh.Request, state *typ
 
 func handleShellProxy(channel ssh.Channel, state *types.SessionState) {
 	if err := ensureSSOAuthentication(channel, state); err != nil {
+		appmetrics.Default().RecordProxySession("failure")
 		types.LogInfo("Session rejected during SSO confirmation: client=%s err=%v", state.ClientUser, err)
 		fmt.Fprintf(channel, "Error: %v\n", err)
 		sendExitStatus(channel, 1)
@@ -304,15 +309,19 @@ func handleShellProxy(channel ssh.Channel, state *types.SessionState) {
 		return
 	}
 	if err := proxySession(channel, state, "", ""); err != nil {
+		appmetrics.Default().RecordProxySession("failure")
 		types.LogInfo("Shell proxy failed: client=%s err=%v", state.ClientUser, err)
 		fmt.Fprintf(channel, "Error: %v\n", err)
 		channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Code uint32 }{1}))
 		closeClientSession(channel, state)
+		return
 	}
+	appmetrics.Default().RecordProxySession("success")
 }
 
 func handleExecProxy(channel ssh.Channel, state *types.SessionState, command string) {
 	if !state.AllowDirectCommands {
+		appmetrics.Default().RecordProxySession("rejected")
 		types.LogInfo("Rejected direct command for client=%s: direct command execution is disabled", state.ClientUser)
 		fmt.Fprintf(channel, "Error: direct commands are disabled; set allow_direct_commands=true in the proxy config to enable them\n")
 		sendExitStatus(channel, 1)
@@ -321,6 +330,7 @@ func handleExecProxy(channel ssh.Channel, state *types.SessionState, command str
 	}
 
 	if err := ensureSSOAuthentication(channel, state); err != nil {
+		appmetrics.Default().RecordProxySession("failure")
 		types.LogInfo("Direct command rejected during SSO confirmation: client=%s err=%v", state.ClientUser, err)
 		fmt.Fprintf(channel, "Error: %v\n", err)
 		sendExitStatus(channel, 1)
@@ -329,11 +339,14 @@ func handleExecProxy(channel ssh.Channel, state *types.SessionState, command str
 	}
 
 	if err := proxySession(channel, state, "", command); err != nil {
+		appmetrics.Default().RecordProxySession("failure")
 		types.LogInfo("Direct command proxy failed: client=%s err=%v", state.ClientUser, err)
 		fmt.Fprintf(channel, "Error: %v\n", err)
 		channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Code uint32 }{1}))
 		closeClientSession(channel, state)
+		return
 	}
+	appmetrics.Default().RecordProxySession("success")
 }
 
 func ensureSSOAuthentication(channel ssh.Channel, state *types.SessionState) error {
@@ -346,6 +359,10 @@ func ensureSSOAuthentication(channel ssh.Channel, state *types.SessionState) err
 		clientUser = state.ClientUser
 	}
 	types.LogInfo("Starting SSO confirmation: client=%s provider=%s realm=%s timeout=%s poll_interval=%s connect_timeout=%s", clientUser, state.SSOProvider, state.SSORealm, state.SSOAuthTimeout.Round(time.Second), state.SSOPollInterval.Round(time.Second), state.SSORequestTimeout.Round(time.Second))
+
+	metrics := appmetrics.Default()
+	metrics.SSOWaitingStarted()
+	defer metrics.SSOWaitingFinished()
 
 	cfg := sso.Config{
 		Enabled:        state.SSOEnabled,
@@ -361,11 +378,15 @@ func ensureSSOAuthentication(channel ssh.Channel, state *types.SessionState) err
 	}
 	identity, err := runSSODeviceAuth(context.Background(), cfg, channel)
 	if err != nil {
+		metrics.RecordSSOConfirmation("failure")
+		metrics.RecordSSOError()
 		types.LogInfo("SSO confirmation failed: client=%s provider=%s realm=%s err=%v", clientUser, cfg.Provider, cfg.Realm, err)
 		return err
 	}
 	if state.SSOEnforceUserMatch {
 		if !identity.MatchesSSHUser(clientUser) {
+			metrics.RecordSSOConfirmation("failure")
+			metrics.RecordSSOError()
 			identifier := identity.BestIdentifier()
 			if identifier == "" {
 				return fmt.Errorf("SSO confirmation succeeded but did not provide an identity that can be matched to SSH user %q", clientUser)
@@ -375,6 +396,7 @@ func ensureSSOAuthentication(channel ssh.Channel, state *types.SessionState) err
 		types.LogInfo("SSO identity matched SSH user: client=%s identity=%s", clientUser, identity.BestIdentifier())
 	}
 	state.SSOVerified = true
+	metrics.RecordSSOConfirmation("success")
 	types.LogInfo("SSO confirmation successful: client=%s provider=%s realm=%s", clientUser, cfg.Provider, cfg.Realm)
 	return nil
 }

@@ -23,6 +23,12 @@ type StaticRoutingConfig struct {
 	ConnectTimeoutSeconds int `json:"connect_timeout_seconds"`
 }
 
+type MetricsConfig struct {
+	Enabled bool   `json:"enabled"`
+	Listen  string `json:"listen"`
+	Path    string `json:"path"`
+}
+
 type SSOConfig struct {
 	Enabled               bool   `json:"enabled"`
 	Provider              string `json:"provider"`
@@ -51,6 +57,7 @@ type Config struct {
 	Retries               int                 `json:"retries"`
 	ConnectTimeoutSeconds int                 `json:"connect_timeout_seconds"`
 	StaticRouting         StaticRoutingConfig `json:"static_routing"`
+	Metrics               MetricsConfig       `json:"metrics"`
 	SSO                   SSOConfig           `json:"sso"`
 }
 
@@ -72,6 +79,11 @@ func Default() Config {
 			Enabled: false,
 			Servers: nil,
 			Mode:    server.RoutingModeFailover,
+		},
+		Metrics: MetricsConfig{
+			Enabled: false,
+			Listen:  "127.0.0.1:9090",
+			Path:    "/metrics",
 		},
 		SSO: SSOConfig{
 			Enabled:               false,
@@ -152,6 +164,14 @@ func (c *Config) Validate() error {
 	}
 	if c.ConnectTimeoutSeconds <= 0 {
 		c.ConnectTimeoutSeconds = server.DefaultConnectTimeoutSeconds
+	}
+	if strings.TrimSpace(c.Metrics.Listen) == "" {
+		c.Metrics.Listen = "127.0.0.1:9090"
+	}
+	if strings.TrimSpace(c.Metrics.Path) == "" {
+		c.Metrics.Path = "/metrics"
+	} else if !strings.HasPrefix(c.Metrics.Path, "/") {
+		c.Metrics.Path = "/" + strings.TrimLeft(c.Metrics.Path, "/")
 	}
 
 	c.SSO.Provider = sso.NormalizeProvider(c.SSO.Provider)

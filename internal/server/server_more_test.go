@@ -6,11 +6,15 @@ import (
 	"encoding/binary"
 	"io"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	appmetrics "ssh-proxy-server/internal/metrics"
 	"ssh-proxy-server/internal/sso"
 	"ssh-proxy-server/internal/types"
 
@@ -276,6 +280,64 @@ func TestEnsureSSOAuthenticationAllowsMismatchedIdentityWhenDisabled(t *testing.
 	if !state.SSOVerified {
 		t.Fatal("expected SSOVerified to be true when identity binding is disabled")
 	}
+}
+
+func TestEnsureSSOAuthenticationTracksPendingAndErrorsMetrics(t *testing.T) {
+	original := runSSODeviceAuth
+	defer func() { runSSODeviceAuth = original }()
+
+	runSSODeviceAuth = func(ctx context.Context, cfg sso.Config, output io.Writer) (sso.Identity, error) {
+		return sso.Identity{}, context.DeadlineExceeded
+	}
+
+	beforeErrors := readMetricValue(t, "ssh_proxy_sso_errors_total")
+
+	channel := &stubSSHChannel{}
+	state := &types.SessionState{
+		ClientUser:      "alice",
+		SSOEnabled:      true,
+		SSOProvider:     "keycloak",
+		SSORealm:        "ssh-proxy-server",
+		SSOClientID:     "ssh-proxy-server-cli",
+		SSOAuthTimeout:  5 * time.Second,
+		SSOPollInterval: time.Second,
+	}
+
+	err := ensureSSOAuthentication(channel, state)
+	if err == nil {
+		t.Fatal("expected ensureSSOAuthentication() to return an error when SSO fails")
+	}
+
+	afterErrors := readMetricValue(t, "ssh_proxy_sso_errors_total")
+	if afterErrors != beforeErrors+1 {
+		t.Fatalf("ssh_proxy_sso_errors_total = %v, want %v", afterErrors, beforeErrors+1)
+	}
+
+	if pending := readMetricValue(t, "ssh_proxy_sso_pending_sessions"); pending != 0 {
+		t.Fatalf("ssh_proxy_sso_pending_sessions = %v, want 0", pending)
+	}
+}
+
+func readMetricValue(t *testing.T, metricName string) float64 {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	appmetrics.Default().Handler().ServeHTTP(rec, req)
+
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		if strings.HasPrefix(line, metricName+" ") {
+			valueText := strings.TrimSpace(strings.TrimPrefix(line, metricName+" "))
+			value, err := strconv.ParseFloat(valueText, 64)
+			if err != nil {
+				t.Fatalf("failed to parse %s value %q: %v", metricName, valueText, err)
+			}
+			return value
+		}
+	}
+
+	t.Fatalf("metric %q not found in Prometheus output", metricName)
+	return 0
 }
 
 type stubSSHChannel struct {
