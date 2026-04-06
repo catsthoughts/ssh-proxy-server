@@ -1,9 +1,9 @@
 package types
 
 import (
+	"golang.org/x/crypto/ssh"
 	"log"
 	"ssh-proxy-server/internal/recording"
-	"golang.org/x/crypto/ssh"
 )
 
 var currentLogLevel int
@@ -41,20 +41,23 @@ func LogDebug(format string, args ...interface{}) {
 
 // SessionState holds the state of a proxied SSH session
 type SessionState struct {
-	ClientUser     string
-	ClientKey      ssh.PublicKey
-	ClientConn     ssh.Conn
-	AgentRequested bool
-	TargetHost     string
-	TargetPort     string
-	TargetUser     string
-	TargetConn     ssh.Conn
-	TargetClient   *ssh.Client
-	TargetSession  *ssh.Session
-	Recorder       *recording.AsciinemaRecorder
-	RecordingsDir  string
-	EnvVars        map[string]string // Environment variables sent by client
-	PtyTerm        string
-	PtyCols        int
-	PtyRows        int
+	ClientUser            string
+	ClientKey             ssh.PublicKey
+	ClientConn            ssh.Conn
+	AgentRequested        bool
+	AllowDirectCommands   bool
+	InsecureIgnoreHostKey bool
+	RecordingFormat       string
+	TargetHost            string
+	TargetPort            string
+	TargetUser            string
+	TargetConn            ssh.Conn
+	TargetClient          *ssh.Client
+	TargetSession         *ssh.Session
+	Recorder              recording.Recorder
+	RecordingsDir         string
+	EnvVars               map[string]string // Environment variables sent by client
+	PtyTerm               string
+	PtyCols               int
+	PtyRows               int
 }

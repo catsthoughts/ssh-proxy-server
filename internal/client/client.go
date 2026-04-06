@@ -37,7 +37,7 @@ func ConnectToTarget(state *types.SessionState, targetUser, targetHost, targetPo
 		return nil, err
 	}
 
-	hostKeyCallback, err := getHostKeyCallback()
+	hostKeyCallback, err := getHostKeyCallback(state)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +85,7 @@ func authMethodForClient(state *types.SessionState) (ssh.AuthMethod, error) {
 	return ssh.PublicKeys(signers...), nil
 }
 
-func getHostKeyCallback() (ssh.HostKeyCallback, error) {
+func getHostKeyCallback(state *types.SessionState) (ssh.HostKeyCallback, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve home directory: %w", err)
@@ -93,16 +93,22 @@ func getHostKeyCallback() (ssh.HostKeyCallback, error) {
 
 	knownHostsPath := filepath.Join(homeDir, ".ssh", "known_hosts")
 	callback, err := knownhosts.New(knownHostsPath)
+	if err == nil && !hostKeyVerificationDisabled(state) {
+		return callback, nil
+	}
+	if hostKeyVerificationDisabled(state) {
+		types.LogInfo("WARNING: insecure host key verification is enabled; target host keys will not be verified")
+		return ssh.InsecureIgnoreHostKey(), nil
+	}
 	if err == nil {
 		return callback, nil
 	}
 
-	if envEnabled(insecureIgnoreHostKeyEnv) {
-		types.LogInfo("WARNING: insecure host key verification enabled because %s is set", insecureIgnoreHostKeyEnv)
-		return ssh.InsecureIgnoreHostKey(), nil
-	}
+	return nil, fmt.Errorf("known_hosts is required at %s for target verification (set %s=1 or start the proxy with -insecure-ignore-hostkey only for temporary development use): %w", knownHostsPath, insecureIgnoreHostKeyEnv, err)
+}
 
-	return nil, fmt.Errorf("known_hosts is required at %s for target verification (set %s=1 only for temporary development use): %w", knownHostsPath, insecureIgnoreHostKeyEnv, err)
+func hostKeyVerificationDisabled(state *types.SessionState) bool {
+	return (state != nil && state.InsecureIgnoreHostKey) || envEnabled(insecureIgnoreHostKeyEnv)
 }
 
 // ProxyWithKeyForwarding handles the proxying with key information.
@@ -112,7 +118,7 @@ func ProxyWithKeyForwarding(clientChan ssh.Channel, state *types.SessionState) e
 
 // BidiProxy creates a bidirectional proxy between client and server channels
 // with recording support.
-func BidiProxy(clientChan io.ReadWriteCloser, targetChan io.ReadWriteCloser, recorder *recording.AsciinemaRecorder) error {
+func BidiProxy(clientChan io.ReadWriteCloser, targetChan io.ReadWriteCloser, recorder recording.Recorder) error {
 	var wg sync.WaitGroup
 	var err1, err2 error
 

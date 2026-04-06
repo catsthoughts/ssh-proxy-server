@@ -9,7 +9,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"unicode"
 
 	proxyclient "ssh-proxy-server/internal/client"
 	"ssh-proxy-server/internal/recording"
@@ -19,7 +21,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir, authorizedKeysPath string, autoAcceptClientKeys bool) {
+func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir, authorizedKeysPath string, autoAcceptClientKeys, allowDirectCommands, insecureIgnoreHostKey bool, recordingFormat string) {
 	defer conn.Close()
 
 	var clientKey ssh.PublicKey
@@ -53,11 +55,14 @@ func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir, authoriz
 
 	// Create session state for this connection
 	state := &types.SessionState{
-		ClientUser:    sshConn.User(),
-		ClientKey:     clientKey,
-		ClientConn:    sshConn,
-		RecordingsDir: recordingsDir,
-		EnvVars:       make(map[string]string),
+		ClientUser:            sshConn.User(),
+		ClientKey:             clientKey,
+		ClientConn:            sshConn,
+		AllowDirectCommands:   allowDirectCommands,
+		InsecureIgnoreHostKey: insecureIgnoreHostKey,
+		RecordingFormat:       recording.NormalizeFormat(recordingFormat),
+		RecordingsDir:         recordingsDir,
+		EnvVars:               make(map[string]string),
 	}
 
 	// Handle global requests (like env variables)
@@ -207,6 +212,14 @@ func handleShellProxy(channel ssh.Channel, state *types.SessionState) {
 }
 
 func handleExecProxy(channel ssh.Channel, state *types.SessionState, command string) {
+	if !state.AllowDirectCommands {
+		types.LogInfo("Rejected direct command for client=%s: direct command execution is disabled", state.ClientUser)
+		fmt.Fprintf(channel, "Error: direct commands are disabled; restart the proxy with -allow-direct-commands to enable them\n")
+		sendExitStatus(channel, 1)
+		closeClientSession(channel, state)
+		return
+	}
+
 	targetAddr := state.EnvVars["LC_SSH_SERVER"]
 	if targetAddr == "" {
 		targetAddr = formatTargetAddress(state.TargetUser, state.TargetHost, state.TargetPort)
@@ -217,7 +230,7 @@ func handleExecProxy(channel ssh.Channel, state *types.SessionState, command str
 
 	if targetAddr == "" {
 		fmt.Fprintf(channel, "Error: No target host specified\n")
-		channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Code uint32 }{1}))
+		sendExitStatus(channel, 1)
 		closeClientSession(channel, state)
 		return
 	}
@@ -252,22 +265,31 @@ func handleEnvRequest(req *ssh.Request, state *types.SessionState) {
 		return
 	}
 	varValue := string(payload[8+nameLen : 8+nameLen+valueLen])
-	state.EnvVars[varName] = varValue
-
-	types.LogDebug("Received environment variable: %s=%s", varName, varValue)
 
 	if varName == "LC_SSH_SERVER" {
 		targetUser, targetHost, targetPort, err := splitTargetAddress(varValue)
 		if err != nil {
-			types.LogInfo("Invalid LC_SSH_SERVER value: %s", varValue)
-		} else {
-			state.TargetUser = targetUser
-			state.TargetHost = targetHost
-			state.TargetPort = targetPort
-			types.LogInfo("Target parsed from LC_SSH_SERVER: user=%s host=%s port=%s", targetUser, targetHost, targetPort)
+			clientUser := "unknown"
+			if state != nil && state.ClientUser != "" {
+				clientUser = state.ClientUser
+			}
+			types.LogInfo("Rejected suspicious LC_SSH_SERVER value for client=%s: %q (%v)", clientUser, varValue, err)
+			req.Reply(false, nil)
+			return
 		}
+
+		state.EnvVars[varName] = varValue
+		types.LogDebug("Received environment variable: %s=%s", varName, varValue)
+		state.TargetUser = targetUser
+		state.TargetHost = targetHost
+		state.TargetPort = targetPort
+		types.LogInfo("Target parsed from LC_SSH_SERVER: user=%s host=%s port=%s", targetUser, targetHost, targetPort)
+		req.Reply(true, nil)
+		return
 	}
 
+	state.EnvVars[varName] = varValue
+	types.LogDebug("Received environment variable: %s=%s", varName, varValue)
 	req.Reply(true, nil)
 }
 
@@ -281,7 +303,8 @@ func proxySession(channel ssh.Channel, state *types.SessionState, targetAddr, co
 	state.TargetPort = targetPort
 
 	recordingID := generateRecordingID()
-	recordingFileName := buildRecordingFileName(state.TargetUser, state.TargetHost, state.TargetPort, recordingID)
+	recordingFormat := recording.NormalizeFormat(state.RecordingFormat)
+	recordingFileName := buildRecordingFileName(state.TargetUser, state.TargetHost, state.TargetPort, recordingID, recordingFormat)
 	recordingsDir := state.RecordingsDir
 	if strings.TrimSpace(recordingsDir) == "" {
 		recordingsDir = "recordings"
@@ -294,7 +317,10 @@ func proxySession(channel ssh.Channel, state *types.SessionState, targetAddr, co
 		return fmt.Errorf("failed to secure recordings directory permissions: %w", err)
 	}
 
-	state.Recorder = recording.NewAsciinemaRecorder(recordingPath)
+	state.Recorder, err = recording.NewRecorder(recordingFormat, recordingPath)
+	if err != nil {
+		return fmt.Errorf("failed to create %s recorder: %w", recordingFormat, err)
+	}
 	defer state.Recorder.Close()
 
 	types.LogInfo("Connecting to target %s", formatTargetAddress(targetUser, targetHost, targetPort))
@@ -369,9 +395,22 @@ func proxySession(channel ssh.Channel, state *types.SessionState, targetAddr, co
 }
 
 func splitTargetAddress(targetAddr string) (string, string, string, error) {
+	if strings.TrimSpace(targetAddr) == "" {
+		return "", "", "", fmt.Errorf("invalid target format (expected user@host[:port])")
+	}
+	if strings.TrimSpace(targetAddr) != targetAddr {
+		return "", "", "", fmt.Errorf("target contains leading or trailing whitespace")
+	}
+	if strings.ContainsAny(targetAddr, " \t\r\n\"'`;&|<>\\(){}") {
+		return "", "", "", fmt.Errorf("target contains potentially unsafe characters")
+	}
+
 	targetUser, hostPort, ok := strings.Cut(targetAddr, "@")
 	if !ok || targetUser == "" || hostPort == "" {
-		return "", "", "", fmt.Errorf("invalid target format (expected user@host:port)")
+		return "", "", "", fmt.Errorf("invalid target format (expected user@host[:port])")
+	}
+	if !isSafeTargetUser(targetUser) {
+		return "", "", "", fmt.Errorf("invalid target user")
 	}
 
 	host := hostPort
@@ -394,10 +433,61 @@ func splitTargetAddress(targetAddr string) (string, string, string, error) {
 	}
 
 	if host == "" {
-		return "", "", "", fmt.Errorf("invalid target format (expected user@host:port)")
+		return "", "", "", fmt.Errorf("invalid target format (expected user@host[:port])")
+	}
+	if !isSafeTargetHost(host) {
+		return "", "", "", fmt.Errorf("invalid target host")
+	}
+	if !isSafeTargetPort(port) {
+		return "", "", "", fmt.Errorf("invalid target port")
 	}
 
 	return targetUser, host, port, nil
+}
+
+func isSafeTargetUser(user string) bool {
+	if user == "" {
+		return false
+	}
+	for _, r := range user {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune("._-+", r) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isSafeTargetHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return true
+	}
+	for _, r := range host {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune("._-", r) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isSafeTargetPort(port string) bool {
+	if port == "" {
+		return false
+	}
+	for _, r := range port {
+		if !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	value, err := strconv.Atoi(port)
+	if err != nil {
+		return false
+	}
+	return value >= 1 && value <= 65535
 }
 
 func formatTargetAddress(user, host, port string) string {
@@ -496,7 +586,7 @@ func copySessionOutput(dst io.Writer, src io.Reader, state *types.SessionState, 
 }
 
 type outputRecorderWriter struct {
-	recorder *recording.AsciinemaRecorder
+	recorder recording.Recorder
 }
 
 func (w outputRecorderWriter) Write(p []byte) (int, error) {
@@ -509,7 +599,7 @@ func (w outputRecorderWriter) Write(p []byte) (int, error) {
 }
 
 type inputRecorderWriter struct {
-	recorder *recording.AsciinemaRecorder
+	recorder recording.Recorder
 }
 
 func (w inputRecorderWriter) Write(p []byte) (int, error) {
@@ -546,7 +636,7 @@ func parseWindowChange(payload []byte, cols, rows *int) {
 	}
 }
 
-func buildRecordingFileName(targetUser, targetHost, targetPort, recordingID string) string {
+func buildRecordingFileName(targetUser, targetHost, targetPort, recordingID, recordingFormat string) string {
 	parts := make([]string, 0, 4)
 
 	if user := sanitizeFileComponent(targetUser); user != "" {
@@ -560,7 +650,7 @@ func buildRecordingFileName(targetUser, targetHost, targetPort, recordingID stri
 	}
 
 	parts = append(parts, recordingID)
-	return strings.Join(parts, "_") + ".cast"
+	return strings.Join(parts, "_") + recording.FileExtension(recordingFormat)
 }
 
 func sanitizeFileComponent(value string) string {

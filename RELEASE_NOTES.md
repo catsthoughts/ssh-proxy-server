@@ -2,7 +2,7 @@
 
 ## Overview
 
-SSH proxy server with dynamic target routing via `LC_SSH_SERVER`, SSH agent-based target authentication, session recording, clean shutdown handling, and terminal resize forwarding.
+SSH proxy server with dynamic target routing via `LC_SSH_SERVER`, SSH agent-based target authentication, session recording, clean shutdown handling, and terminal resize forwarding. Interactive terminal sessions are enabled by default; direct commands require `-allow-direct-commands`.
 
 ## What Was Implemented
 
@@ -10,7 +10,7 @@ SSH proxy server with dynamic target routing via `LC_SSH_SERVER`, SSH agent-base
 
 1. **SSH Server** (`server.go`)
    - Accepts SSH client connections with public key authentication
-   - Handles SSH channel requests (shell, exec, pty-req, window-change)
+   - Handles SSH channel requests (`shell`, `pty-req`, `window-change`, and `exec` when `-allow-direct-commands` is enabled)
    - **NEW: Handles SSH environment variables via `env` channel requests**
 
 2. **Dynamic Routing via SendEnv** ✅ NEW
@@ -20,7 +20,7 @@ SSH proxy server with dynamic target routing via `LC_SSH_SERVER`, SSH agent-base
    - Priority-based selection: SendEnv > command
 
 3. **Session Recording** (`recording.go`)
-   - Records all sessions in asciinema v2 format
+   - Records sessions in `asciinema` v2 by default, or in plain `script` transcript format when selected
    - Unique session IDs for each recording
    - Thread-safe recording with mutex
    - Tracks both input and output
@@ -34,7 +34,7 @@ SSH proxy server with dynamic target routing via `LC_SSH_SERVER`, SSH agent-base
    - Establishes a real outbound SSH connection to the target host
    - Reuses the client's SSH agent (`ssh -A` / `SSH_AUTH_SOCK`)
    - Prefers the same key that authenticated to the proxy
-   - Uses `known_hosts` when available
+   - Uses `known_hosts` by default, with an optional `-insecure-ignore-hostkey` startup override for development
 
 ### Documentation
 
@@ -60,6 +60,9 @@ LC_SSH_SERVER="user@target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 lo
 ```bash
 # One-liner connection
 LC_SSH_SERVER="admin@server:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost
+
+# Development-only startup if known_hosts mismatches must be ignored temporarily
+./ssh-proxy-server -listen localhost:2222 -key ./ssh_host_key -log-level info -recordings-dir ./recordings -insecure-ignore-hostkey
 
 # SSH config file
 cat >> ~/.ssh/config <<'EOF'
@@ -87,7 +90,7 @@ LC_SSH_SERVER="user@target:22" ssh my-proxy
 ### Code Changes
 
 **`internal/server/server.go`**:
-- Handles `env`, `shell`, `exec`, `pty-req`, and `window-change`
+- Handles `env`, `shell`, `pty-req`, and `window-change`, plus gated `exec` requests when enabled
 - Parses `LC_SSH_SERVER` into target user / host / port
 - Proxies stdin/stdout/stderr to the target SSH session
 - Cleanly closes the client session on `Ctrl+D`

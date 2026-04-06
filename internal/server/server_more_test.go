@@ -1,7 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"encoding/binary"
+	"io"
+	"log"
+	"strings"
 	"testing"
 
 	"ssh-proxy-server/internal/types"
@@ -81,6 +85,96 @@ func TestHandleEnvRequestInvalidPayloadDoesNotMutateState(t *testing.T) {
 	if state.TargetUser != "" || state.TargetHost != "" || state.TargetPort != "" {
 		t.Fatalf("expected target fields to remain empty, got (%q, %q, %q)", state.TargetUser, state.TargetHost, state.TargetPort)
 	}
+}
+
+func TestHandleEnvRequestRejectsSuspiciousTargetAndLogs(t *testing.T) {
+	types.SetLogLevel("info")
+
+	var logBuffer bytes.Buffer
+	originalWriter := log.Writer()
+	originalFlags := log.Flags()
+	log.SetOutput(&logBuffer)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(originalWriter)
+		log.SetFlags(originalFlags)
+	}()
+
+	state := &types.SessionState{ClientUser: "alice", EnvVars: map[string]string{"KEEP": "value"}}
+	req := &ssh.Request{
+		Type:      "env",
+		WantReply: false,
+		Payload:   encodeEnvPayload("LC_SSH_SERVER", "alice@example.com;uname -a"),
+	}
+
+	handleEnvRequest(req, state)
+
+	if _, exists := state.EnvVars["LC_SSH_SERVER"]; exists {
+		t.Fatalf("expected suspicious LC_SSH_SERVER to be rejected, got %#v", state.EnvVars)
+	}
+	if state.TargetUser != "" || state.TargetHost != "" || state.TargetPort != "" {
+		t.Fatalf("expected target fields to remain empty, got (%q, %q, %q)", state.TargetUser, state.TargetHost, state.TargetPort)
+	}
+	if got := logBuffer.String(); !strings.Contains(got, "Rejected suspicious LC_SSH_SERVER value") {
+		t.Fatalf("expected suspicious input to be logged, got %q", got)
+	}
+}
+
+func TestHandleExecProxyRejectsDirectCommands(t *testing.T) {
+	channel := &stubSSHChannel{}
+	state := &types.SessionState{EnvVars: make(map[string]string)}
+
+	handleExecProxy(channel, state, "uname -a")
+
+	if got := channel.stdout.String(); !strings.Contains(got, "direct commands are disabled") {
+		t.Fatalf("handleExecProxy() output = %q, want direct command rejection message", got)
+	}
+	if len(channel.requests) != 1 || channel.requests[0].name != "exit-status" {
+		t.Fatalf("expected one exit-status request, got %#v", channel.requests)
+	}
+	if !channel.closed || !channel.closeWriteCalled {
+		t.Fatalf("expected channel to be closed after rejecting exec request")
+	}
+}
+
+type stubSSHChannel struct {
+	stdout           bytes.Buffer
+	stderr           bytes.Buffer
+	requests         []stubChannelRequest
+	closed           bool
+	closeWriteCalled bool
+}
+
+type stubChannelRequest struct {
+	name    string
+	payload []byte
+}
+
+func (c *stubSSHChannel) Read(p []byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (c *stubSSHChannel) Write(p []byte) (int, error) {
+	return c.stdout.Write(p)
+}
+
+func (c *stubSSHChannel) Close() error {
+	c.closed = true
+	return nil
+}
+
+func (c *stubSSHChannel) CloseWrite() error {
+	c.closeWriteCalled = true
+	return nil
+}
+
+func (c *stubSSHChannel) SendRequest(name string, wantReply bool, payload []byte) (bool, error) {
+	c.requests = append(c.requests, stubChannelRequest{name: name, payload: payload})
+	return false, nil
+}
+
+func (c *stubSSHChannel) Stderr() io.ReadWriter {
+	return &c.stderr
 }
 
 func encodeEnvPayload(name, value string) []byte {

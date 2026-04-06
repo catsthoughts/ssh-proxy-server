@@ -33,7 +33,7 @@ LC_SSH_SERVER="user@target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 lo
 This does three things:
 1. defines `LC_SSH_SERVER` locally
 2. sends it to the proxy over SSH
-3. lets the proxy parse `user`, `host`, and `port` and dial the target
+3. lets the proxy validate and parse `user`, `host`, and `port` and dial the target
 
 ## Important note about authentication
 
@@ -68,11 +68,11 @@ LC_SSH_SERVER="user@target-host:22" ssh my-proxy
 ## What the proxy currently supports
 
 - `LC_SSH_SERVER` parsing from SSH `env` requests
-- interactive `shell` sessions
-- `exec` requests
+- interactive `shell` sessions by default
+- optional `exec` requests when the proxy is started with `-allow-direct-commands`
 - PTY allocation via `pty-req`
 - live terminal resize via `window-change`
-- session recording to asciinema v2 files
+- session recording in either `asciinema` (`.cast`) or plain `script` transcript (`.log`) format via `-recording-format`
 
 ## Troubleshooting
 
@@ -100,16 +100,18 @@ ssh-add ~/.ssh/id_rsa
 
 ### Host key verification issues on the target
 
-The proxy tries to use `~/.ssh/known_hosts`. If it is unavailable, it falls back to insecure host key verification for that connection and logs this fact.
+The proxy requires `~/.ssh/known_hosts` for target verification by default. For temporary development-only use, you can override this by starting the proxy with `-insecure-ignore-hostkey` or by setting `SSH_PROXY_INSECURE_IGNORE_HOSTKEY=1`.
 
 ## Notes
 
 - The current implementation expects the variable name **exactly** as `LC_SSH_SERVER`
+- Suspicious values containing shell metacharacters, invalid host/user parts, or malformed ports are rejected and logged
 - Do not put passwords or secrets inside the variable
 - Recordings are saved as:
 
 ```text
 recordings/<user>_<host>_<port>_<session-id>.cast
+# or .log when started with -recording-format script
 ```
 
 ## Comparison with Alternatives

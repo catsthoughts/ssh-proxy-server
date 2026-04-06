@@ -6,11 +6,11 @@ The project is a working Go-based SSH proxy for bastion-style access, auditing, 
 
 1. accepts inbound SSH connections with public key authentication
 2. routes sessions using `LC_SSH_SERVER=user@host[:port]`
-3. proxies both interactive `shell` sessions and `exec` commands
+3. proxies interactive `shell` sessions by default and enables `exec` commands only when started with `-allow-direct-commands`
 4. authenticates to the target host using the client's SSH agent
-5. records full session input/output in asciinema v2 format
+5. records full session input/output in either `asciinema` v2 or plain `script` transcript format
 6. forwards PTY allocation and terminal resize events
-7. exposes security controls for client-key policy and target host verification
+7. exposes security controls for client-key policy, direct-command policy, and target host verification
 
 ---
 
@@ -26,7 +26,7 @@ SSH proxy server
   ├─ parses LC_SSH_SERVER → user / host / port
   ├─ opens an outbound SSH connection to the target
   ├─ authenticates to the target using the forwarded SSH agent
-  ├─ starts a shell or exec session
+  ├─ starts an interactive shell session by default, or an exec session only when `-allow-direct-commands` is enabled
   ├─ proxies stdin/stdout/stderr bidirectionally
   ├─ records the session to a `.cast` file
   └─ forwards PTY resize events to the target
@@ -48,6 +48,9 @@ The proxy is started from `cmd/ssh-proxy-server/main.go` and currently supports:
 - `-recordings-dir` — directory where `.cast` recordings are stored
 - `-authorized-keys` — path to the proxy-side `authorized_keys` file, default `~/.ssh/authorized_keys`
 - `-auto-accept-client-keys` — whether to accept client public keys automatically, default `true`
+- `-allow-direct-commands` — allow SSH `exec` requests (direct command execution), default `false`
+- `-recording-format` — choose `asciinema` or `script` recording output, default `asciinema`
+- `-insecure-ignore-hostkey` — disable target `known_hosts` verification (insecure; temporary development use only), default `false`
 
 ### Security-related environment variables
 
@@ -76,6 +79,7 @@ Implements the proxy-side SSH server behavior:
 - SSH handshake and incoming session setup
 - client public-key callback and authorization check
 - parsing of `env`, `shell`, `exec`, `pty-req`, and `window-change` requests
+- validation of `LC_SSH_SERVER` values, with rejection/logging of suspicious injection-like input
 - session routing and target selection
 - creation of recording filenames and session recorder lifecycle
 - graceful shutdown and exit-status propagation
@@ -94,7 +98,7 @@ Implements outbound SSH connectivity to the target host:
 - prefers the same key that authenticated to the proxy when possible
 - requires forwarded SSH agent access by default
 - loads `~/.ssh/known_hosts` for host verification
-- allows explicit insecure host-key fallback only via an override env var
+- allows explicit insecure host-key fallback via `-insecure-ignore-hostkey` or the `SSH_PROXY_INSECURE_IGNORE_HOSTKEY` env override
 
 ### `internal/hostkey/hostkey.go`
 Manages the proxy server host key:
@@ -104,10 +108,11 @@ Manages the proxy server host key:
 - writes the host key with private file permissions
 
 ### `internal/recording/recording.go`
-Implements asciinema v2 session recording:
+Implements the supported session recording formats:
 
-- writes the recording header and frames
-- captures both input (`"i"`) and output (`"o"`)
+- `asciinema` → writes a JSON header and timed input/output frames
+- `script` → writes a plain-text transcript similar to the `script` utility
+- captures both input (`"i"`) and output (`"o"`) where applicable
 - serializes writes via a mutex
 - creates recording files with `0600` permissions
 
@@ -155,7 +160,7 @@ For a session target, the proxy currently prefers:
 
 1. `LC_SSH_SERVER` received via SSH environment
 2. target information already parsed into session state
-3. an `exec` command-derived target, if applicable
+3. an `exec` command-derived target, if applicable and direct-command mode is enabled
 
 ---
 
@@ -184,8 +189,8 @@ When possible, the proxy prefers the same public key that authenticated the clie
 For target verification:
 
 - default behavior uses `~/.ssh/known_hosts`
-- if `known_hosts` is unavailable, the connection fails closed
-- insecure bypass is available only via `SSH_PROXY_INSECURE_IGNORE_HOSTKEY=1`
+- if `known_hosts` is unavailable or the key mismatches, the connection fails closed
+- insecure bypass is available via `-insecure-ignore-hostkey` or `SSH_PROXY_INSECURE_IGNORE_HOSTKEY=1` for temporary development-only use
 
 ---
 
@@ -200,16 +205,16 @@ The current server handles these session-level requests:
 - `pty-req`
 - `window-change`
 - `shell`
-- `exec`
+- `exec` (rejected unless `-allow-direct-commands` is enabled)
 
 Unsupported or unknown request types are rejected.
 
 ### Interactive shell vs `exec`
 
-Both modes are supported:
+Interactive terminal access is the default behavior:
 
 - `shell` → starts a remote interactive shell
-- `exec` → runs the requested remote command and returns the exit status
+- `exec` → is rejected by default; when `-allow-direct-commands=true` is set, it runs the requested remote command and returns the exit status
 
 ### PTY and resize forwarding
 

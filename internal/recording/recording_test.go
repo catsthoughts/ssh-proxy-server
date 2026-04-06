@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -62,6 +63,43 @@ func TestAsciinemaRecorderDisabledOnCreateError(t *testing.T) {
 	}
 	if err := recorder.WriteInput([]byte("input")); err != nil {
 		t.Fatalf("WriteInput() should be a no-op for disabled recorder, got error: %v", err)
+	}
+}
+
+func TestNewRecorderScriptWritesTranscript(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "session.log")
+	recorder, err := NewRecorder("script", filePath)
+	if err != nil {
+		t.Fatalf("NewRecorder(script) returned error: %v", err)
+	}
+	defer recorder.Close()
+
+	if err := recorder.WriteInput([]byte("ls\n")); err != nil {
+		t.Fatalf("WriteInput() returned error: %v", err)
+	}
+	if err := recorder.Write([]byte("file1\nfile2\n")); err != nil {
+		t.Fatalf("Write() returned error: %v", err)
+	}
+	if err := recorder.Close(); err != nil {
+		t.Fatalf("Close() returned error: %v", err)
+	}
+
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("ReadFile() returned error: %v", err)
+	}
+	text := string(content)
+	if !strings.Contains(text, "Script started on") {
+		t.Fatalf("expected script header in transcript, got %q", text)
+	}
+	if !strings.Contains(text, "ls\n") || !strings.Contains(text, "file1\nfile2\n") {
+		t.Fatalf("expected transcript to contain input and output, got %q", text)
+	}
+}
+
+func TestNewRecorderRejectsUnknownFormat(t *testing.T) {
+	if _, err := NewRecorder("unknown", filepath.Join(t.TempDir(), "session.out")); err == nil {
+		t.Fatal("expected NewRecorder() to reject an unsupported format")
 	}
 }
 

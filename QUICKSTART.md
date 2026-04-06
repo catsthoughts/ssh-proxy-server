@@ -17,6 +17,12 @@ Available log levels:
 - `info`
 - `debug`
 
+> By default, the proxy allows **interactive terminal sessions only** and records sessions in `asciinema` format. To permit `ssh ... <command>` style execution, start it with `-allow-direct-commands`.
+>
+> If you want plain-text transcript files instead of `.cast`, start it with `-recording-format script`.
+>
+> If the target host key changed and you are in a temporary development scenario, you can start the proxy with `-insecure-ignore-hostkey`.
+
 ## 3. Connect through the proxy
 
 In another terminal:
@@ -32,6 +38,29 @@ Replace:
 
 > `ssh -A` is recommended so the proxy can authenticate to the target using your SSH agent.
 
+### Optional: enable direct commands
+
+If you want one-shot command execution, restart the proxy with `-allow-direct-commands` and then connect with a trailing command:
+
+```bash
+./ssh-proxy-server -listen localhost:2222 -key ./ssh_host_key -log-level info -recordings-dir ./recordings -allow-direct-commands
+LC_SSH_SERVER="user@target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost 'hostname'
+```
+
+### Optional: ignore target host key mismatches for development
+
+If you hit `knownhosts: key mismatch` and need a temporary dev-only workaround:
+
+```bash
+./ssh-proxy-server -listen localhost:2222 -key ./ssh_host_key -log-level info -recordings-dir ./recordings -insecure-ignore-hostkey
+```
+
+### Optional: store recordings as plain `script` transcripts
+
+```bash
+./ssh-proxy-server -listen localhost:2222 -key ./ssh_host_key -log-level info -recordings-dir ./recordings -recording-format script
+```
+
 ## 4. Check recordings
 
 Sessions are saved to the directory passed with `-recordings-dir`.
@@ -40,6 +69,8 @@ If you use the default value, they appear in `recordings/`:
 ```bash
 ls -la recordings/
 asciinema play recordings/<user>_<host>_<port>_<session-id>.cast
+# or inspect plain-text script transcripts when -recording-format script is used
+cat recordings/<user>_<host>_<port>_<session-id>.log
 ```
 
 ## 5. Troubleshooting

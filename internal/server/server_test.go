@@ -41,6 +41,16 @@ func TestSplitTargetAddress(t *testing.T) {
 			input:   "example.com:22",
 			wantErr: true,
 		},
+		{
+			name:    "rejects suspicious shell metacharacters",
+			input:   "alice@example.com;uname -a",
+			wantErr: true,
+		},
+		{
+			name:    "rejects whitespace injection payload",
+			input:   "alice@example.com -oProxyCommand=evil",
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -120,12 +130,17 @@ func TestParseTargetFromCommand(t *testing.T) {
 }
 
 func TestBuildRecordingFileName(t *testing.T) {
-	got := buildRecordingFileName("alice", "host:name", "22", "session-id")
+	got := buildRecordingFileName("alice", "host:name", "22", "session-id", "asciinema")
 	if got != "alice_host_name_22_session-id.cast" {
 		t.Fatalf("buildRecordingFileName() = %q, want %q", got, "alice_host_name_22_session-id.cast")
 	}
 
 	if !strings.HasSuffix(got, ".cast") {
 		t.Fatalf("buildRecordingFileName() should end with .cast, got %q", got)
+	}
+
+	scriptGot := buildRecordingFileName("alice", "host:name", "22", "session-id", "script")
+	if !strings.HasSuffix(scriptGot, ".log") {
+		t.Fatalf("buildRecordingFileName() with script format should end with .log, got %q", scriptGot)
 	}
 }

@@ -1,13 +1,14 @@
 # SSH Proxy Server
 
 A transparent SSH proxy server written in Go for bastion-style access, SSH session auditing, and controlled target routing.
-It accepts SSH connections with public key authentication, can either auto-accept client keys or validate them against an `authorized_keys` file, reuses the client's SSH agent to authenticate to the destination, routes sessions via `LC_SSH_SERVER=user@host[:port]`, and records activity in asciinema v2 format.
+It accepts SSH connections with public key authentication, can either auto-accept client keys or validate them against an `authorized_keys` file, reuses the client's SSH agent to authenticate to the destination, routes sessions via `LC_SSH_SERVER=user@host[:port]`, and records activity either in `asciinema` v2 or in a plain `script`-style transcript. By default, the proxy allows **interactive terminal sessions only**; direct `exec` commands are enabled only when the server is started with `-allow-direct-commands`.
 
 **Core capabilities:**
 - Accepts inbound SSH connections with configurable client-key policy via `-auto-accept-client-keys` and `-authorized-keys`
 - Reuses the client's forwarded SSH agent to authenticate to the target host
 - Routes sessions using `LC_SSH_SERVER=user@host[:port]` and defaults to port `22`
-- Records shell and exec sessions in asciinema v2 format for audit and analysis
+- Records interactive shell sessions in either `asciinema` or plain `script` transcript format for audit and analysis
+- Can optionally allow direct command execution with `-allow-direct-commands`
 
 **→ [Quick Start Guide](QUICKSTART.md) for immediate setup**
 
@@ -15,10 +16,11 @@ It accepts SSH connections with public key authentication, can either auto-accep
 
 - **Authorized Client Access**: Accept client keys automatically by default, or enforce checks against the file passed via `-authorized-keys`
 - **SSH Agent Reuse**: Requires forwarded agent access via `ssh -A` by default
-- **Session Recording**: Records proxied activity in asciinema format with contextual filenames and private file permissions for audit and analysis
+- **Session Recording**: Records proxied terminal activity in either `asciinema` (`.cast`) or plain `script` transcript (`.log`) format with private file permissions for audit and analysis
+- **Terminal-Only by Default**: Accepts interactive `shell` sessions out of the box; direct `exec` requests stay disabled unless `-allow-direct-commands` is set
 - **Dynamic Routing via SendEnv**: Target host specified with `LC_SSH_SERVER=user@host[:port]`
 - **Transparent Proxying**: Acts as an intermediate SSH server and opens a real target SSH session
-- **Host Key Verification**: Requires `~/.ssh/known_hosts` by default, with an explicit insecure override for development only
+- **Host Key Verification**: Requires `~/.ssh/known_hosts` by default, with an explicit insecure override for development only via `-insecure-ignore-hostkey`
 - **Configurable Logging**: Supports `error`, `info`, and `debug` log levels
 
 ## Requirements
@@ -54,7 +56,26 @@ Available log levels: `error`, `info`, `debug`
 
 The `-authorized-keys` flag defaults to `~/.ssh/authorized_keys`.
 The `-auto-accept-client-keys` flag defaults to `true`; set it to `false` to enforce checking the authorized keys file.
+The `-allow-direct-commands` flag defaults to `false`; without it, the proxy accepts only interactive terminal sessions.
+The `-recording-format` flag defaults to `asciinema`; set it to `script` for a plain-text transcript file.
+The `-insecure-ignore-hostkey` flag defaults to `false`; set it only for temporary development use when you want to ignore `known_hosts` mismatches or missing entries.
 This keeps local development simple while still allowing a stricter production mode.
+
+#### Common startup modes
+
+```bash
+# Standard secure mode
+./ssh-proxy-server -listen localhost:2222 -key ./ssh_host_key -log-level info -recordings-dir ./recordings
+
+# Temporary development mode if the target host key changed or known_hosts is missing
+./ssh-proxy-server -listen localhost:2222 -key ./ssh_host_key -log-level info -recordings-dir ./recordings -insecure-ignore-hostkey
+
+# Allow direct ssh 'command' execution as well
+./ssh-proxy-server -listen localhost:2222 -key ./ssh_host_key -log-level info -recordings-dir ./recordings -allow-direct-commands
+
+# Write plain script-style transcript files instead of asciinema .cast files
+./ssh-proxy-server -listen localhost:2222 -key ./ssh_host_key -log-level info -recordings-dir ./recordings -recording-format script
+```
 
 You can store recordings in a custom directory with:
 
@@ -74,9 +95,19 @@ LC_SSH_SERVER="user@target-host[:port]" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 222
 ```
 
 If `:port` is omitted, the proxy uses the default SSH port `22`.
-The proxy receives `LC_SSH_SERVER`, extracts `user`, `host`, and `port`, and opens the target SSH session accordingly.
+The proxy receives `LC_SSH_SERVER`, validates it, extracts `user`, `host`, and `port`, and opens the target SSH session accordingly. Suspicious values with shell metacharacters or invalid host/port parts are rejected and logged.
 
 **Note**: Direct connection without `LC_SSH_SERVER` will fail with "Error: LC_SSH_SERVER not provided"
+
+### Optional: enable direct command execution
+
+If you want `ssh ... <command>` style execution, start the **proxy server itself** with `-allow-direct-commands` and restart it. This flag is passed to `./ssh-proxy-server`, not to the client-side `ssh` command:
+
+```bash
+./ssh-proxy-server -listen localhost:2222 -key ./ssh_host_key -log-level info -recordings-dir ./recordings -allow-direct-commands
+
+LC_SSH_SERVER="user@target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost 'uname -a'
+```
 
 ## Examples
 
@@ -102,6 +133,33 @@ LC_SSH_SERVER="ubuntu@192.168.1.100:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 222
 LC_SSH_SERVER="user@target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost
 ```
 
+### "Error: direct commands are disabled"
+
+**Problem**: You connected with `ssh ... localhost 'command'`, which sends an SSH `exec` request, but the proxy is running in terminal-only mode.
+
+**Solution**: Either connect interactively without a trailing command, or restart the proxy with:
+
+```bash
+./ssh-proxy-server ... -allow-direct-commands
+```
+
+### "knownhosts: key mismatch"
+
+**Problem**: The target host key in `~/.ssh/known_hosts` does not match the current server key.
+
+**Preferred fix**: remove the stale entry and reconnect:
+
+```bash
+ssh-keygen -R target-host.example.com
+ssh your-user@target-host.example.com
+```
+
+**Temporary development workaround**: restart the proxy with:
+
+```bash
+./ssh-proxy-server ... -insecure-ignore-hostkey
+```
+
 ### "Permission denied" or connection issues
 
 **Problem**: SSH key authentication failed, the client key is not authorized on the proxy, or the target host is unreachable.
@@ -119,15 +177,23 @@ For development-only scenarios, the following options are available:
 - `-authorized-keys /path/to/authorized_keys` — use a custom allowlist for proxy login
 - `SSH_PROXY_AUTO_ACCEPT_CLIENT_KEYS=true` — set the default for `-auto-accept-client-keys`; use `-auto-accept-client-keys=false` to enforce the allowlist
 - `SSH_PROXY_ALLOW_LOCAL_AGENT_FALLBACK=1` — allow fallback to the proxy host's local `SSH_AUTH_SOCK`
-- `SSH_PROXY_INSECURE_IGNORE_HOSTKEY=1` — bypass `known_hosts` verification for target connections
+- `-insecure-ignore-hostkey` — bypass `known_hosts` verification for target connections (preferred explicit startup flag)
+- `SSH_PROXY_INSECURE_IGNORE_HOSTKEY=1` — sets the default for `-insecure-ignore-hostkey`
 
 ## Recording Format
 
-Sessions are recorded in asciinema v2 format in the directory passed with `-recordings-dir`.
-By default, that directory is `./recordings/`:
-- Filename: `<user>_<host>_<port>_<session-id>.cast`
-- Contains complete session transcripts, including user input and command output
-- Can be viewed with `asciinema play recordings/<file>.cast`
+Sessions are recorded in the directory passed with `-recordings-dir`.
+By default, the proxy uses `-recording-format asciinema` and stores files in `./recordings/`:
+
+- `asciinema` format → `<user>_<host>_<port>_<session-id>.cast`
+- `script` format → `<user>_<host>_<port>_<session-id>.log`
+
+Both formats contain terminal transcript data with private file permissions.
+You can view asciinema captures with:
+
+```bash
+asciinema play recordings/<file>.cast
+```
 
 ## Project Structure
 
