@@ -22,6 +22,7 @@ It accepts SSH connections with public key authentication, can either auto-accep
 - **Transparent Proxying**: Acts as an intermediate SSH server and opens a real target SSH session
 - **Host Key Verification**: Requires `~/.ssh/known_hosts` by default, with an explicit insecure override for development only via `insecure_ignore_hostkey` in the JSON config
 - **Optional SSO Second Factor**: Can print a Keycloak verification link to the SSH console and wait for approval before proxying the session
+- **Prometheus Metrics**: Can expose `/metrics` using `prometheus/client_golang` for scraping by Prometheus
 - **Configurable Logging**: Supports `error`, `info`, and `debug` log levels
 
 ## Requirements
@@ -78,6 +79,11 @@ Example `config.json`:
     ],
     "mode": "failover"
   },
+  "metrics": {
+    "enabled": false,
+    "listen": "127.0.0.1:9090",
+    "path": "/metrics"
+  },
   "sso": {
     "enabled": false,
     "provider": "keycloak",
@@ -111,6 +117,8 @@ Key JSON settings:
 - `retries` and `connect_timeout_seconds` — global target connection retry/timeout settings for both dynamic and static routing
 - `static_routing.enabled` — when `true`, the proxy ignores `LC_SSH_SERVER` and uses the configured `servers` list
 - `static_routing.mode` — `failover` or `round_robin`
+- `metrics.enabled` — enables the Prometheus metrics endpoint
+- `metrics.listen` and `metrics.path` — where to expose the scrape endpoint (for example `127.0.0.1:9090` and `/metrics`)
 - `sso.enabled` — enables a second-factor confirmation step before the SSH session is proxied
 - `sso.provider` — currently supports `keycloak`
 - `sso.client_secret` — optional; set it when the Keycloak client is confidential
@@ -163,6 +171,37 @@ ssh -A -p 2222 your-user@localhost
 ```
 
 The proxy will try the configured servers in order, move to the next one when a target is unavailable, and rotate the starting target per session when `mode` is `round_robin`. The global `retries` and `connect_timeout_seconds` values apply here too.
+
+### Optional: enable Prometheus metrics
+
+If you want Prometheus to scrape runtime metrics from the proxy, enable `metrics` in `config.json`.
+
+```json
+{
+  "metrics": {
+    "enabled": true,
+    "listen": "127.0.0.1:9090",
+    "path": "/metrics"
+  }
+}
+```
+
+Then scrape the endpoint, for example:
+
+```bash
+curl http://127.0.0.1:9090/metrics
+```
+
+Useful links:
+- Prometheus project: <https://prometheus.io/>
+- Prometheus documentation: <https://prometheus.io/docs/introduction/overview/>
+
+The proxy exports counters and gauges for established SSH connections, handshake failures, proxied session results, SSO confirmation results, the number of sessions currently waiting for SSO/2FA approval, and the total number of SSO/2FA errors.
+
+Relevant SSO-related metrics include:
+- `ssh_proxy_sso_confirmations_total{result="success|failure|rejected"}` — SSO confirmation outcomes
+- `ssh_proxy_sso_pending_sessions` — current SSH sessions waiting for browser approval / second factor
+- `ssh_proxy_sso_errors_total` — total SSO/2FA failures, including timeout / polling errors and rejected identity matches
 
 ### Optional: enable Keycloak SSO second factor
 

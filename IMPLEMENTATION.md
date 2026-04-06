@@ -11,8 +11,9 @@ The project is a working Go-based SSH proxy for bastion-style access, auditing, 
 5. can require a Keycloak-based second factor before the session is proxied to the target host
    - this adds an extra identity check beyond the SSH key and helps protect bastion access
 6. records full session input/output in either `asciinema` v2 or plain `script` transcript format
-7. forwards PTY allocation and terminal resize events
-8. exposes security controls for client-key policy, direct-command policy, and target host verification
+7. can expose Prometheus-compatible metrics using `prometheus/client_golang`, including SSH/session counters and SSO/2FA waiting/error visibility
+8. forwards PTY allocation and terminal resize events
+9. exposes security controls for client-key policy, direct-command policy, and target host verification
 
 ---
 
@@ -60,6 +61,11 @@ The config file currently supports:
 - `allow_direct_commands` — allow SSH `exec` requests (direct command execution), default `false`
 - `recording_format` — choose `asciinema` or `script` recording output, default `asciinema`
 - `insecure_ignore_hostkey` — disable target `known_hosts` verification (insecure; temporary development use only), default `false`
+- `metrics` — optional Prometheus metrics endpoint configuration; disabled by default
+  - `listen` — metrics listen address, default `127.0.0.1:9090`
+  - `path` — scrape path, default `/metrics`
+  - Prometheus project: <https://prometheus.io/>
+  - Prometheus documentation: <https://prometheus.io/docs/introduction/overview/>
 - `sso` — optional second-factor configuration for a Keycloak realm; disabled by default
   - `auth_timeout_seconds` — maximum time to wait for browser approval
   - `poll_interval_seconds` — polling interval for approval checks
@@ -131,6 +137,15 @@ Implements the supported session recording formats:
 - captures both input (`"i"`) and output (`"o"`) where applicable
 - serializes writes via a mutex
 - creates recording files with `0600` permissions
+
+### `internal/metrics/metrics.go`
+Provides the Prometheus collector and HTTP handler:
+
+- exports SSH connection totals and active-connection gauge
+- records handshake failures and proxied session outcomes
+- records SSO confirmation outcomes by result label
+- tracks `ssh_proxy_sso_pending_sessions` for sessions currently waiting on second-factor approval
+- tracks `ssh_proxy_sso_errors_total` for SSO/2FA failures such as timeouts, polling errors, or user/identity mismatches
 
 ### `internal/types/types.go`
 Holds shared state for an active session, including:

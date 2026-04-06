@@ -37,7 +37,17 @@ SSH proxy server with dynamic target routing via `LC_SSH_SERVER` or static routi
    - Prefers the same key that authenticated to the proxy
    - Uses `known_hosts` by default, with an optional `insecure_ignore_hostkey` config override for development
 
-6. **Keycloak SSO Second Factor** ✅ NEW
+6. **Prometheus Metrics** ✅ NEW
+   - Optional `metrics` block in `config.json`, disabled by default
+   - Exposes a scrape endpoint such as `http://127.0.0.1:9090/metrics`
+   - Built using `prometheus/client_golang`
+   - Prometheus project: <https://prometheus.io/>
+   - Prometheus documentation: <https://prometheus.io/docs/introduction/overview/>
+   - Tracks SSH connections, handshake failures, proxy session outcomes, and SSO confirmation outcomes
+   - **NEW:** exposes `ssh_proxy_sso_pending_sessions` to show how many SSH sessions are currently waiting for second-factor approval
+   - **NEW:** exposes `ssh_proxy_sso_errors_total` to count failed SSO/2FA attempts, including timeouts and user-match rejections
+
+7. **Keycloak SSO Second Factor** ✅ NEW
    - Optional `sso` block in `config.json`, disabled by default
    - Prints a browser verification link directly into the SSH terminal
    - Adds a 2FA confirmation step to reduce the chance of unauthorized bastion access

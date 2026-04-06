@@ -39,6 +39,9 @@ Available log levels:
 >
 > If you want a browser-based second factor, enable `"sso": { "enabled": true, ... }` and the proxy will print a Keycloak confirmation link into the SSH console.
 >
+> If you want Prometheus scraping, enable `"metrics": { "enabled": true, ... }` and the proxy will expose a metrics endpoint such as `http://127.0.0.1:9090/metrics`.
+> This includes 2FA-focused metrics like `ssh_proxy_sso_pending_sessions` and `ssh_proxy_sso_errors_total`.
+>
 > If the target host key changed and you are in a temporary development scenario, set `"insecure_ignore_hostkey": true`.
 
 ## 3. Connect through the proxy
@@ -65,6 +68,10 @@ If you want one-shot command execution, set `"allow_direct_commands": true` in `
 LC_SSH_SERVER="target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 your-user@localhost 'hostname'
 ```
 
+Prometheus links:
+- Prometheus project: <https://prometheus.io/>
+- Prometheus documentation: <https://prometheus.io/docs/introduction/overview/>
+
 ### Optional: require Keycloak SSO confirmation
 
 Set `"sso": { "enabled": true, ... }` in `config.json` to require a browser confirmation step before the proxy opens the target session. The default test realm is `ssh-proxy-server`.
@@ -76,6 +83,10 @@ Useful links:
 - Keycloak docs: <https://www.keycloak.org/documentation>
 
 When the SSH session starts, the proxy prints a verification link into the terminal and waits up to `sso.auth_timeout_seconds` for approval. It re-checks Keycloak every `sso.poll_interval_seconds`, and each request to Keycloak uses `sso.connect_timeout_seconds` as the HTTP timeout. By default the confirmed Keycloak user must also match the SSH username; set `sso.enforce_ssh_user_match` to `false` if you need to disable that check. If your Keycloak client is confidential, also set `sso.client_secret` in `config.json`.
+
+Once metrics are enabled, you can also monitor the second-factor flow via:
+- `ssh_proxy_sso_pending_sessions` — how many SSH sessions are currently waiting for browser approval
+- `ssh_proxy_sso_errors_total` — how many SSO/2FA attempts ended with an error
 
 ### Optional: use static routing with failover / round-robin
 

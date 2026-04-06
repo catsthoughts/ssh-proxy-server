@@ -18,6 +18,11 @@
     ],
     "mode": "failover"
   },
+  "metrics": {
+    "enabled": false,
+    "listen": "127.0.0.1:9090",
+    "path": "/metrics"
+  },
   "sso": {
     "enabled": false,
     "provider": "keycloak",
