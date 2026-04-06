@@ -73,11 +73,12 @@ func TestHandleEnvRequestStoresTargetDetails(t *testing.T) {
 
 	handleEnvRequest(req, state)
 
-	if got := state.EnvVars["LC_SSH_SERVER"]; got != "example.com:2222" {
-		t.Fatalf("EnvVars[LC_SSH_SERVER] = %q, want %q", got, "example.com:2222")
+	if got := state.GetEnvVar("LC_SSH_SERVER"); got != "example.com:2222" {
+		t.Fatalf("GetEnvVar(LC_SSH_SERVER) = %q, want %q", got, "example.com:2222")
 	}
-	if state.TargetUser != "alice" || state.TargetHost != "example.com" || state.TargetPort != "2222" {
-		t.Fatalf("parsed target = (%q, %q, %q), want (%q, %q, %q)", state.TargetUser, state.TargetHost, state.TargetPort, "alice", "example.com", "2222")
+	user, host, port := state.Target()
+	if user != "alice" || host != "example.com" || port != "2222" {
+		t.Fatalf("Target() = (%q, %q, %q), want (%q, %q, %q)", user, host, port, "alice", "example.com", "2222")
 	}
 }
 
@@ -87,11 +88,13 @@ func TestHandleEnvRequestInvalidPayloadDoesNotMutateState(t *testing.T) {
 
 	handleEnvRequest(req, state)
 
-	if len(state.EnvVars) != 1 || state.EnvVars["KEEP"] != "value" {
-		t.Fatalf("expected existing env vars to remain unchanged, got %#v", state.EnvVars)
+	envVars := state.EnvVarsSnapshot()
+	if len(envVars) != 1 || envVars["KEEP"] != "value" {
+		t.Fatalf("expected existing env vars to remain unchanged, got %#v", envVars)
 	}
-	if state.TargetUser != "" || state.TargetHost != "" || state.TargetPort != "" {
-		t.Fatalf("expected target fields to remain empty, got (%q, %q, %q)", state.TargetUser, state.TargetHost, state.TargetPort)
+	user, host, port := state.Target()
+	if user != "" || host != "" || port != "" {
+		t.Fatalf("expected target fields to remain empty, got (%q, %q, %q)", user, host, port)
 	}
 }
 
@@ -117,11 +120,13 @@ func TestHandleEnvRequestRejectsSuspiciousTargetAndLogs(t *testing.T) {
 
 	handleEnvRequest(req, state)
 
-	if _, exists := state.EnvVars["LC_SSH_SERVER"]; exists {
-		t.Fatalf("expected suspicious LC_SSH_SERVER to be rejected, got %#v", state.EnvVars)
+	envVars := state.EnvVarsSnapshot()
+	if _, exists := envVars["LC_SSH_SERVER"]; exists {
+		t.Fatalf("expected suspicious LC_SSH_SERVER to be rejected, got %#v", envVars)
 	}
-	if state.TargetUser != "" || state.TargetHost != "" || state.TargetPort != "" {
-		t.Fatalf("expected target fields to remain empty, got (%q, %q, %q)", state.TargetUser, state.TargetHost, state.TargetPort)
+	user, host, port := state.Target()
+	if user != "" || host != "" || port != "" {
+		t.Fatalf("expected target fields to remain empty, got (%q, %q, %q)", user, host, port)
 	}
 	if got := logBuffer.String(); !strings.Contains(got, "Rejected suspicious LC_SSH_SERVER value") {
 		t.Fatalf("expected suspicious input to be logged, got %q", got)
@@ -218,7 +223,7 @@ func TestEnsureSSOAuthenticationShowsLinkAndMarksVerified(t *testing.T) {
 	if err := ensureSSOAuthentication(channel, state); err != nil {
 		t.Fatalf("ensureSSOAuthentication() returned error: %v", err)
 	}
-	if !state.SSOVerified {
+	if !state.IsSSOVerified() {
 		t.Fatal("expected SSOVerified to be true after successful SSO auth")
 	}
 	if got := channel.stdout.String(); !strings.Contains(got, "https://sso.example/verify") {
@@ -251,7 +256,7 @@ func TestEnsureSSOAuthenticationRejectsMismatchedIdentityWhenEnforced(t *testing
 	if !strings.Contains(strings.ToLower(err.Error()), "does not match") {
 		t.Fatalf("expected mismatch error, got %q", err.Error())
 	}
-	if state.SSOVerified {
+	if state.IsSSOVerified() {
 		t.Fatal("expected SSOVerified to remain false after mismatch")
 	}
 }
@@ -277,7 +282,7 @@ func TestEnsureSSOAuthenticationAllowsMismatchedIdentityWhenDisabled(t *testing.
 	if err := ensureSSOAuthentication(channel, state); err != nil {
 		t.Fatalf("ensureSSOAuthentication() returned error with identity binding disabled: %v", err)
 	}
-	if !state.SSOVerified {
+	if !state.IsSSOVerified() {
 		t.Fatal("expected SSOVerified to be true when identity binding is disabled")
 	}
 }
