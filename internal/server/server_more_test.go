@@ -2,13 +2,16 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"io"
 	"log"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"ssh-proxy-server/internal/sso"
 	"ssh-proxy-server/internal/types"
 
 	"golang.org/x/crypto/ssh"
@@ -177,6 +180,43 @@ func TestOrderedStaticTargetsRoundRobinRotates(t *testing.T) {
 	}
 	if !reflect.DeepEqual(second, []string{"two.example.com:22", "three.example.com:22", "one.example.com:22"}) {
 		t.Fatalf("second orderedStaticTargets() = %#v", second)
+	}
+}
+
+func TestEnsureSSOAuthenticationShowsLinkAndMarksVerified(t *testing.T) {
+	original := runSSODeviceAuth
+	defer func() { runSSODeviceAuth = original }()
+
+	runSSODeviceAuth = func(ctx context.Context, cfg sso.Config, output io.Writer) error {
+		if cfg.Realm != "ssh-proxy-server" {
+			t.Fatalf("cfg.Realm = %q, want %q", cfg.Realm, "ssh-proxy-server")
+		}
+		if cfg.AuthTimeout != 45*time.Second {
+			t.Fatalf("cfg.AuthTimeout = %s, want %s", cfg.AuthTimeout, 45*time.Second)
+		}
+		_, _ = io.WriteString(output, "Open browser: https://sso.example/verify\n")
+		return nil
+	}
+
+	channel := &stubSSHChannel{}
+	state := &types.SessionState{
+		SSOEnabled:      true,
+		SSOProvider:     "keycloak",
+		SSOBaseURL:      "http://localhost:8080",
+		SSORealm:        "ssh-proxy-server",
+		SSOClientID:     "ssh-proxy-server-cli",
+		SSOAuthTimeout:  45 * time.Second,
+		SSOPollInterval: 3 * time.Second,
+	}
+
+	if err := ensureSSOAuthentication(channel, state); err != nil {
+		t.Fatalf("ensureSSOAuthentication() returned error: %v", err)
+	}
+	if !state.SSOVerified {
+		t.Fatal("expected SSOVerified to be true after successful SSO auth")
+	}
+	if got := channel.stdout.String(); !strings.Contains(got, "https://sso.example/verify") {
+		t.Fatalf("expected SSO verification link in channel output, got %q", got)
 	}
 }
 

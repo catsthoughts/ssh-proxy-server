@@ -8,9 +8,11 @@ The project is a working Go-based SSH proxy for bastion-style access, auditing, 
 2. routes sessions using `LC_SSH_SERVER=host[:port]` and reuses the SSH session user for the target login by default
 3. proxies interactive `shell` sessions by default and enables `exec` commands only when `allow_direct_commands` is set in the JSON config
 4. authenticates to the target host using the client's SSH agent
-5. records full session input/output in either `asciinema` v2 or plain `script` transcript format
-6. forwards PTY allocation and terminal resize events
-7. exposes security controls for client-key policy, direct-command policy, and target host verification
+5. can require a Keycloak-based second factor before the session is proxied to the target host
+   - this adds an extra identity check beyond the SSH key and helps protect bastion access
+6. records full session input/output in either `asciinema` v2 or plain `script` transcript format
+7. forwards PTY allocation and terminal resize events
+8. exposes security controls for client-key policy, direct-command policy, and target host verification
 
 ---
 
@@ -27,6 +29,7 @@ SSH proxy server
   ├─ opens an outbound SSH connection to the target
   ├─ authenticates to the target using the forwarded SSH agent
   ├─ starts an interactive shell session by default, or an exec session only when `allow_direct_commands` is enabled in the JSON config
+  ├─ optionally prints a Keycloak verification link and waits for second-factor approval
   ├─ proxies stdin/stdout/stderr bidirectionally
   ├─ records the session to a `.cast` file
   └─ forwards PTY resize events to the target
@@ -57,6 +60,12 @@ The config file currently supports:
 - `allow_direct_commands` — allow SSH `exec` requests (direct command execution), default `false`
 - `recording_format` — choose `asciinema` or `script` recording output, default `asciinema`
 - `insecure_ignore_hostkey` — disable target `known_hosts` verification (insecure; temporary development use only), default `false`
+- `sso` — optional second-factor configuration for a Keycloak realm; disabled by default
+  - `auth_timeout_seconds` — maximum time to wait for browser approval
+  - `poll_interval_seconds` — polling interval for approval checks
+  - `connect_timeout_seconds` — per-request HTTP timeout for Keycloak discovery/device/poll calls
+  - `scope` — defaults to `openid`; profile/email claims are not required by the proxy
+  - based on Keycloak device authorization flow: <https://www.keycloak.org/> and <https://www.keycloak.org/documentation>
 
 ### Security-related environment variables
 
@@ -299,6 +308,7 @@ Example startup:
 - SSH agent behavior and fallback decisions
 - PTY allocation and terminal resize forwarding
 - input/output stream lifecycle
+- SSO confirmation start / success / failure with configured timeouts
 - final session exit status
 - recording file creation failures
 

@@ -37,6 +37,8 @@ Available log levels:
 >
 > The top-level `"retries"` and `"connect_timeout_seconds"` settings apply to both normal `LC_SSH_SERVER` routing and static routing.
 >
+> If you want a browser-based second factor, enable `"sso": { "enabled": true, ... }` and the proxy will print a Keycloak confirmation link into the SSH console.
+>
 > If the target host key changed and you are in a temporary development scenario, set `"insecure_ignore_hostkey": true`.
 
 ## 3. Connect through the proxy
@@ -62,6 +64,18 @@ If you want one-shot command execution, set `"allow_direct_commands": true` in `
 ./ssh-proxy-server -config ./config.json
 LC_SSH_SERVER="target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 your-user@localhost 'hostname'
 ```
+
+### Optional: require Keycloak SSO confirmation
+
+Set `"sso": { "enabled": true, ... }` in `config.json` to require a browser confirmation step before the proxy opens the target session. The default test realm is `ssh-proxy-server`.
+
+Why use 2FA: it adds a second proof of identity on top of the SSH key, which helps protect bastion access from stolen keys or accidental credential exposure. The default `scope` is just `openid`, because the proxy does not require profile or email claims.
+
+Useful links:
+- Keycloak project: <https://www.keycloak.org/>
+- Keycloak docs: <https://www.keycloak.org/documentation>
+
+When the SSH session starts, the proxy prints a verification link into the terminal and waits up to `sso.auth_timeout_seconds` for approval. It re-checks Keycloak every `sso.poll_interval_seconds`, and each request to Keycloak uses `sso.connect_timeout_seconds` as the HTTP timeout. If your Keycloak client is confidential, also set `sso.client_secret` in `config.json`.
 
 ### Optional: use static routing with failover / round-robin
 

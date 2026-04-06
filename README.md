@@ -1,7 +1,7 @@
 # SSH Proxy Server
 
 A transparent SSH proxy server written in Go for bastion-style access, SSH session auditing, and controlled target routing.
-It accepts SSH connections with public key authentication, can either auto-accept client keys or validate them against an `authorized_keys` file, reuses the client's SSH agent to authenticate to the destination, supports either dynamic routing via `LC_SSH_SERVER=host[:port]` or static routing through a fixed server list with failover / retries / round-robin, and uses the authenticated SSH session user for the final target login by default. All startup settings are loaded from a JSON config file passed via `-config`.
+It accepts SSH connections with public key authentication, can either auto-accept client keys or validate them against an `authorized_keys` file, reuses the client's SSH agent to authenticate to the destination, supports either dynamic routing via `LC_SSH_SERVER=host[:port]` or static routing through a fixed server list with failover / retries / round-robin, can require a Keycloak-based SSO second factor before the SSH session continues, and uses the authenticated SSH session user for the final target login by default. All startup settings are loaded from a JSON config file passed via `-config`.
 
 **Core capabilities:**
 - Accepts inbound SSH connections with configurable client-key policy via `auto_accept_client_keys` and `authorized_keys` in the JSON config
@@ -21,6 +21,7 @@ It accepts SSH connections with public key authentication, can either auto-accep
 - **Dynamic or Static Routing**: Use `LC_SSH_SERVER=host[:port]` or enable `static_routing` with failover / round-robin
 - **Transparent Proxying**: Acts as an intermediate SSH server and opens a real target SSH session
 - **Host Key Verification**: Requires `~/.ssh/known_hosts` by default, with an explicit insecure override for development only via `insecure_ignore_hostkey` in the JSON config
+- **Optional SSO Second Factor**: Can print a Keycloak verification link to the SSH console and wait for approval before proxying the session
 - **Configurable Logging**: Supports `error`, `info`, and `debug` log levels
 
 ## Requirements
@@ -76,6 +77,18 @@ Example `config.json`:
       "backup-target:22"
     ],
     "mode": "failover"
+  },
+  "sso": {
+    "enabled": false,
+    "provider": "keycloak",
+    "base_url": "http://localhost:8080",
+    "realm": "ssh-proxy-server",
+    "client_id": "ssh-proxy-server",
+    "client_secret": "",
+    "scope": "openid",
+    "auth_timeout_seconds": 120,
+    "poll_interval_seconds": 5,
+    "connect_timeout_seconds": 10
   }
 }
 ```
@@ -97,6 +110,12 @@ Key JSON settings:
 - `retries` and `connect_timeout_seconds` — global target connection retry/timeout settings for both dynamic and static routing
 - `static_routing.enabled` — when `true`, the proxy ignores `LC_SSH_SERVER` and uses the configured `servers` list
 - `static_routing.mode` — `failover` or `round_robin`
+- `sso.enabled` — enables a second-factor confirmation step before the SSH session is proxied
+- `sso.provider` — currently supports `keycloak`
+- `sso.client_secret` — optional; set it when the Keycloak client is confidential
+- `sso.auth_timeout_seconds` — how long to wait for approval in the browser before rejecting the SSH session
+- `sso.poll_interval_seconds` — how often the proxy re-checks Keycloak for approval status
+- `sso.connect_timeout_seconds` — per-request timeout for discovery, device authorization, and polling calls to Keycloak
 
 You can store recordings in a custom directory by setting `"recordings_dir": "/path/to/recordings"` in the JSON config.
 
@@ -142,6 +161,34 @@ ssh -A -p 2222 your-user@localhost
 ```
 
 The proxy will try the configured servers in order, move to the next one when a target is unavailable, and rotate the starting target per session when `mode` is `round_robin`. The global `retries` and `connect_timeout_seconds` values apply here too.
+
+### Optional: enable Keycloak SSO second factor
+
+If you want users to confirm the SSH session in a browser before proxying starts, enable `sso` in `config.json`. The test setup is aimed at a Keycloak server with realm `ssh-proxy-server`.
+
+Why this helps: **2FA reduces the risk of unauthorized SSH access** if a workstation, browser session, or SSH key is compromised. The user must both initiate the SSH session and confirm it in the identity provider. The default `scope` is only `openid`, which is sufficient for this flow.
+
+Useful links:
+- Keycloak project: <https://www.keycloak.org/>
+- Keycloak documentation: <https://www.keycloak.org/documentation>
+
+```json
+{
+  "sso": {
+    "enabled": true,
+    "provider": "keycloak",
+    "base_url": "http://localhost:8080",
+    "realm": "ssh-proxy-server",
+    "client_id": "ssh-proxy-server",
+    "client_secret": "",
+    "auth_timeout_seconds": 120,
+    "poll_interval_seconds": 5,
+    "connect_timeout_seconds": 10
+  }
+}
+```
+
+When the SSH client opens a shell or direct command session, the proxy prints a verification link to the SSH console and waits up to `auth_timeout_seconds` for confirmation. The proxy re-checks approval every `poll_interval_seconds`, and each HTTP call to Keycloak is capped by `connect_timeout_seconds`. If the user does not approve the login in time, the SSH session is rejected.
 
 ### Optional: enable direct command execution
 
@@ -189,6 +236,18 @@ LC_SSH_SERVER="target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 your-us
 **Problem**: You connected with `ssh ... localhost 'command'`, which sends an SSH `exec` request, but the proxy is running in terminal-only mode.
 
 **Solution**: Either connect interactively without a trailing command, or set `"allow_direct_commands": true` in the JSON config and restart the proxy.
+
+### "SSO device authorization failed: Invalid client or Invalid client credentials"
+
+**Problem**: the configured Keycloak client either does not exist, is confidential without a secret, or does not have the OAuth 2.0 Device Authorization Grant enabled.
+
+**Solution**: verify `sso.client_id`, set `sso.client_secret` when the Keycloak client is confidential, and enable **OAuth 2.0 Device Authorization Grant** for that client in the `ssh-proxy-server` realm.
+
+### "SSO confirmation timed out"
+
+**Problem**: Keycloak approval was not completed before the configured timeout expired.
+
+**Solution**: open the printed verification link and finish the second-factor step, or increase `sso.auth_timeout_seconds` in `config.json`.
 
 ### "knownhosts: key mismatch"
 

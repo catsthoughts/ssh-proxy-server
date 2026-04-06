@@ -186,3 +186,74 @@ func TestLoadRejectsStaticRoutingWithoutServers(t *testing.T) {
 		t.Fatalf("expected static_routing.servers validation error, got %q", err.Error())
 	}
 }
+
+func TestLoadAppliesSSOSettings(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	configJSON := `{
+		"sso": {
+			"enabled": true,
+			"base_url": "http://localhost:8080",
+			"realm": "ssh-proxy-server",
+			"client_id": "ssh-proxy-server-cli",
+			"client_secret": "top-secret",
+			"auth_timeout_seconds": 45,
+			"poll_interval_seconds": 3,
+			"connect_timeout_seconds": 9
+		}
+	}`
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatalf("WriteFile() returned error: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+
+	if !cfg.SSO.Enabled {
+		t.Fatal("expected SSO.Enabled to be true")
+	}
+	if cfg.SSO.Provider != "keycloak" {
+		t.Fatalf("SSO.Provider = %q, want %q", cfg.SSO.Provider, "keycloak")
+	}
+	if cfg.SSO.Realm != "ssh-proxy-server" {
+		t.Fatalf("SSO.Realm = %q, want %q", cfg.SSO.Realm, "ssh-proxy-server")
+	}
+	if cfg.SSO.ClientSecret != "top-secret" {
+		t.Fatalf("SSO.ClientSecret = %q, want %q", cfg.SSO.ClientSecret, "top-secret")
+	}
+	if cfg.SSO.AuthTimeoutSeconds != 45 {
+		t.Fatalf("SSO.AuthTimeoutSeconds = %d, want %d", cfg.SSO.AuthTimeoutSeconds, 45)
+	}
+	if cfg.SSO.PollIntervalSeconds != 3 {
+		t.Fatalf("SSO.PollIntervalSeconds = %d, want %d", cfg.SSO.PollIntervalSeconds, 3)
+	}
+	if cfg.SSO.ConnectTimeoutSeconds != 9 {
+		t.Fatalf("SSO.ConnectTimeoutSeconds = %d, want %d", cfg.SSO.ConnectTimeoutSeconds, 9)
+	}
+}
+
+func TestLoadRejectsUnsupportedSSOProvider(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	configJSON := `{
+		"sso": {
+			"enabled": true,
+			"provider": "unknown"
+		}
+	}`
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatalf("WriteFile() returned error: %v", err)
+	}
+
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatal("expected Load() to reject an unsupported SSO provider")
+	}
+	if !strings.Contains(err.Error(), "sso.provider") {
+		t.Fatalf("expected sso.provider validation error, got %q", err.Error())
+	}
+}

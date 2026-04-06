@@ -56,6 +56,17 @@ type SessionState struct {
 	StaticRoutingMode     string
 	ConnectTimeout        time.Duration
 	ConnectRetries        int
+	SSOEnabled            bool
+	SSOProvider           string
+	SSOBaseURL            string
+	SSORealm              string
+	SSOClientID           string
+	SSOClientSecret       string
+	SSOScope              string
+	SSOAuthTimeout        time.Duration
+	SSOPollInterval       time.Duration
+	SSORequestTimeout     time.Duration
+	SSOVerified           bool
 	TargetHost            string
 	TargetPort            string
 	TargetUser            string
