@@ -8,6 +8,7 @@ import (
 
 	"ssh-proxy-server/internal/recording"
 	"ssh-proxy-server/internal/server"
+	"ssh-proxy-server/internal/sso"
 )
 
 const insecureIgnoreHostKeyEnv = "SSH_PROXY_INSECURE_IGNORE_HOSTKEY"
@@ -20,6 +21,19 @@ type StaticRoutingConfig struct {
 	// Deprecated: kept for backward compatibility with older configs.
 	Retries               int `json:"retries"`
 	ConnectTimeoutSeconds int `json:"connect_timeout_seconds"`
+}
+
+type SSOConfig struct {
+	Enabled               bool   `json:"enabled"`
+	Provider              string `json:"provider"`
+	BaseURL               string `json:"base_url"`
+	Realm                 string `json:"realm"`
+	ClientID              string `json:"client_id"`
+	ClientSecret          string `json:"client_secret"`
+	Scope                 string `json:"scope"`
+	AuthTimeoutSeconds    int    `json:"auth_timeout_seconds"`
+	PollIntervalSeconds   int    `json:"poll_interval_seconds"`
+	ConnectTimeoutSeconds int    `json:"connect_timeout_seconds"`
 }
 
 // Config holds the startup configuration loaded from JSON.
@@ -36,6 +50,7 @@ type Config struct {
 	Retries               int                 `json:"retries"`
 	ConnectTimeoutSeconds int                 `json:"connect_timeout_seconds"`
 	StaticRouting         StaticRoutingConfig `json:"static_routing"`
+	SSO                   SSOConfig           `json:"sso"`
 }
 
 // Default returns the default application configuration.
@@ -56,6 +71,17 @@ func Default() Config {
 			Enabled: false,
 			Servers: nil,
 			Mode:    server.RoutingModeFailover,
+		},
+		SSO: SSOConfig{
+			Enabled:               false,
+			Provider:              sso.DefaultProvider,
+			BaseURL:               sso.DefaultBaseURL,
+			Realm:                 sso.DefaultRealm,
+			ClientID:              sso.DefaultClientID,
+			Scope:                 sso.DefaultScope,
+			AuthTimeoutSeconds:    sso.DefaultAuthTimeoutSeconds,
+			PollIntervalSeconds:   sso.DefaultPollIntervalSeconds,
+			ConnectTimeoutSeconds: sso.DefaultRequestTimeoutSeconds,
 		},
 	}
 }
@@ -124,6 +150,32 @@ func (c *Config) Validate() error {
 	}
 	if c.ConnectTimeoutSeconds <= 0 {
 		c.ConnectTimeoutSeconds = server.DefaultConnectTimeoutSeconds
+	}
+
+	c.SSO.Provider = sso.NormalizeProvider(c.SSO.Provider)
+	if !sso.IsSupportedProvider(c.SSO.Provider) {
+		return fmt.Errorf("sso.provider must be %q", sso.DefaultProvider)
+	}
+	if strings.TrimSpace(c.SSO.BaseURL) == "" {
+		c.SSO.BaseURL = sso.DefaultBaseURL
+	}
+	if strings.TrimSpace(c.SSO.Realm) == "" {
+		c.SSO.Realm = sso.DefaultRealm
+	}
+	if strings.TrimSpace(c.SSO.ClientID) == "" {
+		c.SSO.ClientID = sso.DefaultClientID
+	}
+	if strings.TrimSpace(c.SSO.Scope) == "" {
+		c.SSO.Scope = sso.DefaultScope
+	}
+	if c.SSO.AuthTimeoutSeconds <= 0 {
+		c.SSO.AuthTimeoutSeconds = sso.DefaultAuthTimeoutSeconds
+	}
+	if c.SSO.PollIntervalSeconds <= 0 {
+		c.SSO.PollIntervalSeconds = sso.DefaultPollIntervalSeconds
+	}
+	if c.SSO.ConnectTimeoutSeconds <= 0 {
+		c.SSO.ConnectTimeoutSeconds = sso.DefaultRequestTimeoutSeconds
 	}
 
 	c.StaticRouting.Mode = server.NormalizeRoutingMode(c.StaticRouting.Mode)

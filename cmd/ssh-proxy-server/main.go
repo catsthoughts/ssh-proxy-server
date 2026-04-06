@@ -52,6 +52,11 @@ func main() {
 	} else {
 		types.LogInfo("Dynamic routing enabled: target is expected from LC_SSH_SERVER")
 	}
+	if cfg.SSO.Enabled {
+		types.LogInfo("SSO second factor enabled: provider=%s base_url=%s realm=%s timeout=%ds poll_interval=%ds connect_timeout=%ds", cfg.SSO.Provider, cfg.SSO.BaseURL, cfg.SSO.Realm, cfg.SSO.AuthTimeoutSeconds, cfg.SSO.PollIntervalSeconds, cfg.SSO.ConnectTimeoutSeconds)
+	} else {
+		types.LogInfo("SSO second factor is disabled")
+	}
 
 	routingConfig := server.RoutingConfig{
 		StaticEnabled:  cfg.StaticRouting.Enabled,
@@ -59,6 +64,18 @@ func main() {
 		Mode:           cfg.StaticRouting.Mode,
 		ConnectTimeout: time.Duration(cfg.ConnectTimeoutSeconds) * time.Second,
 		Retries:        cfg.Retries,
+	}
+	ssoConfig := server.SSOConfig{
+		Enabled:        cfg.SSO.Enabled,
+		Provider:       cfg.SSO.Provider,
+		BaseURL:        cfg.SSO.BaseURL,
+		Realm:          cfg.SSO.Realm,
+		ClientID:       cfg.SSO.ClientID,
+		ClientSecret:   cfg.SSO.ClientSecret,
+		Scope:          cfg.SSO.Scope,
+		AuthTimeout:    time.Duration(cfg.SSO.AuthTimeoutSeconds) * time.Second,
+		PollInterval:   time.Duration(cfg.SSO.PollIntervalSeconds) * time.Second,
+		RequestTimeout: time.Duration(cfg.SSO.ConnectTimeoutSeconds) * time.Second,
 	}
 
 	hostKey, err := hostkey.LoadOrGenerateHostKey(cfg.Key)
@@ -81,6 +98,6 @@ func main() {
 			continue
 		}
 
-		go server.HandleConnection(conn, hostKey, cfg.RecordingsDir, cfg.AuthorizedKeys, cfg.AutoAcceptClientKeys, cfg.AllowDirectCommands, cfg.InsecureIgnoreHostKey, cfg.RecordingFormat, routingConfig)
+		go server.HandleConnection(conn, hostKey, cfg.RecordingsDir, cfg.AuthorizedKeys, cfg.AutoAcceptClientKeys, cfg.AllowDirectCommands, cfg.InsecureIgnoreHostKey, cfg.RecordingFormat, routingConfig, ssoConfig)
 	}
 }

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 
 	proxyclient "ssh-proxy-server/internal/client"
 	"ssh-proxy-server/internal/recording"
+	"ssh-proxy-server/internal/sso"
 	"ssh-proxy-server/internal/types"
 
 	"github.com/google/uuid"
@@ -30,6 +32,7 @@ const (
 )
 
 var staticRouteCounter uint64
+var runSSODeviceAuth = sso.AuthenticateDeviceFlow
 
 type RoutingConfig struct {
 	StaticEnabled  bool
@@ -37,6 +40,19 @@ type RoutingConfig struct {
 	Mode           string
 	ConnectTimeout time.Duration
 	Retries        int
+}
+
+type SSOConfig struct {
+	Enabled        bool
+	Provider       string
+	BaseURL        string
+	Realm          string
+	ClientID       string
+	ClientSecret   string
+	Scope          string
+	AuthTimeout    time.Duration
+	PollInterval   time.Duration
+	RequestTimeout time.Duration
 }
 
 func NormalizeRoutingMode(mode string) string {
@@ -64,7 +80,7 @@ func ValidateTargetAddress(target string) error {
 	return err
 }
 
-func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir, authorizedKeysPath string, autoAcceptClientKeys, allowDirectCommands, insecureIgnoreHostKey bool, recordingFormat string, routingConfig RoutingConfig) {
+func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir, authorizedKeysPath string, autoAcceptClientKeys, allowDirectCommands, insecureIgnoreHostKey bool, recordingFormat string, routingConfig RoutingConfig, ssoConfig SSOConfig) {
 
 	defer conn.Close()
 
@@ -110,6 +126,16 @@ func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir, authoriz
 		StaticRoutingMode:     NormalizeRoutingMode(routingConfig.Mode),
 		ConnectTimeout:        routingConfig.ConnectTimeout,
 		ConnectRetries:        routingConfig.Retries,
+		SSOEnabled:            ssoConfig.Enabled,
+		SSOProvider:           sso.NormalizeProvider(ssoConfig.Provider),
+		SSOBaseURL:            strings.TrimSpace(ssoConfig.BaseURL),
+		SSORealm:              strings.TrimSpace(ssoConfig.Realm),
+		SSOClientID:           strings.TrimSpace(ssoConfig.ClientID),
+		SSOClientSecret:       strings.TrimSpace(ssoConfig.ClientSecret),
+		SSOScope:              strings.TrimSpace(ssoConfig.Scope),
+		SSOAuthTimeout:        ssoConfig.AuthTimeout,
+		SSOPollInterval:       ssoConfig.PollInterval,
+		SSORequestTimeout:     ssoConfig.RequestTimeout,
 		RecordingsDir:         recordingsDir,
 		EnvVars:               make(map[string]string),
 	}
@@ -118,6 +144,27 @@ func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir, authoriz
 	}
 	if state.ConnectRetries < 0 {
 		state.ConnectRetries = 0
+	}
+	if state.SSOAuthTimeout <= 0 {
+		state.SSOAuthTimeout = time.Duration(sso.DefaultAuthTimeoutSeconds) * time.Second
+	}
+	if state.SSOPollInterval <= 0 {
+		state.SSOPollInterval = time.Duration(sso.DefaultPollIntervalSeconds) * time.Second
+	}
+	if state.SSORequestTimeout <= 0 {
+		state.SSORequestTimeout = time.Duration(sso.DefaultRequestTimeoutSeconds) * time.Second
+	}
+	if state.SSOBaseURL == "" {
+		state.SSOBaseURL = sso.DefaultBaseURL
+	}
+	if state.SSORealm == "" {
+		state.SSORealm = sso.DefaultRealm
+	}
+	if state.SSOClientID == "" {
+		state.SSOClientID = sso.DefaultClientID
+	}
+	if state.SSOScope == "" {
+		state.SSOScope = sso.DefaultScope
 	}
 
 	// Handle global requests (like env variables)
@@ -247,7 +294,15 @@ func handleChannel(channel ssh.Channel, requests <-chan *ssh.Request, state *typ
 }
 
 func handleShellProxy(channel ssh.Channel, state *types.SessionState) {
+	if err := ensureSSOAuthentication(channel, state); err != nil {
+		types.LogInfo("Session rejected during SSO confirmation: client=%s err=%v", state.ClientUser, err)
+		fmt.Fprintf(channel, "Error: %v\n", err)
+		sendExitStatus(channel, 1)
+		closeClientSession(channel, state)
+		return
+	}
 	if err := proxySession(channel, state, "", ""); err != nil {
+		types.LogInfo("Shell proxy failed: client=%s err=%v", state.ClientUser, err)
 		fmt.Fprintf(channel, "Error: %v\n", err)
 		channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Code uint32 }{1}))
 		closeClientSession(channel, state)
@@ -263,11 +318,52 @@ func handleExecProxy(channel ssh.Channel, state *types.SessionState, command str
 		return
 	}
 
+	if err := ensureSSOAuthentication(channel, state); err != nil {
+		types.LogInfo("Direct command rejected during SSO confirmation: client=%s err=%v", state.ClientUser, err)
+		fmt.Fprintf(channel, "Error: %v\n", err)
+		sendExitStatus(channel, 1)
+		closeClientSession(channel, state)
+		return
+	}
+
 	if err := proxySession(channel, state, "", command); err != nil {
+		types.LogInfo("Direct command proxy failed: client=%s err=%v", state.ClientUser, err)
 		fmt.Fprintf(channel, "Error: %v\n", err)
 		channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Code uint32 }{1}))
 		closeClientSession(channel, state)
 	}
+}
+
+func ensureSSOAuthentication(channel ssh.Channel, state *types.SessionState) error {
+	if state == nil || !state.SSOEnabled || state.SSOVerified {
+		return nil
+	}
+
+	clientUser := "unknown"
+	if strings.TrimSpace(state.ClientUser) != "" {
+		clientUser = state.ClientUser
+	}
+	types.LogInfo("Starting SSO confirmation: client=%s provider=%s realm=%s timeout=%s poll_interval=%s connect_timeout=%s", clientUser, state.SSOProvider, state.SSORealm, state.SSOAuthTimeout.Round(time.Second), state.SSOPollInterval.Round(time.Second), state.SSORequestTimeout.Round(time.Second))
+
+	cfg := sso.Config{
+		Enabled:        state.SSOEnabled,
+		Provider:       state.SSOProvider,
+		BaseURL:        state.SSOBaseURL,
+		Realm:          state.SSORealm,
+		ClientID:       state.SSOClientID,
+		ClientSecret:   state.SSOClientSecret,
+		Scope:          state.SSOScope,
+		AuthTimeout:    state.SSOAuthTimeout,
+		PollInterval:   state.SSOPollInterval,
+		RequestTimeout: state.SSORequestTimeout,
+	}
+	if err := runSSODeviceAuth(context.Background(), cfg, channel); err != nil {
+		types.LogInfo("SSO confirmation failed: client=%s provider=%s realm=%s err=%v", clientUser, cfg.Provider, cfg.Realm, err)
+		return err
+	}
+	state.SSOVerified = true
+	types.LogInfo("SSO confirmation successful: client=%s provider=%s realm=%s", clientUser, cfg.Provider, cfg.Realm)
+	return nil
 }
 
 func handleEnvRequest(req *ssh.Request, state *types.SessionState) {

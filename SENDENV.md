@@ -75,6 +75,7 @@ LC_SSH_SERVER="target-host:22" ssh your-user@my-proxy
 - PTY allocation via `pty-req`
 - live terminal resize via `window-change`
 - session recording in either `asciinema` (`.cast`) or plain `script` transcript (`.log`) format via the `recording_format` config setting
+- optional Keycloak-based SSO confirmation, where the SSH terminal prints a verification link and waits for second-factor approval
 
 ## Troubleshooting
 

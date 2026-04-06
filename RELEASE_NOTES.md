@@ -2,7 +2,7 @@
 
 ## Overview
 
-SSH proxy server with dynamic target routing via `LC_SSH_SERVER` or static routing through a fixed server list, SSH agent-based target authentication, session recording, clean shutdown handling, terminal resize forwarding, and config-driven startup via `-config`. Interactive terminal sessions are enabled by default; direct commands require `allow_direct_commands` in the JSON config.
+SSH proxy server with dynamic target routing via `LC_SSH_SERVER` or static routing through a fixed server list, SSH agent-based target authentication, optional Keycloak-backed SSO second factor, session recording, clean shutdown handling, terminal resize forwarding, and config-driven startup via `-config`. Interactive terminal sessions are enabled by default; direct commands require `allow_direct_commands` in the JSON config.
 
 ## What Was Implemented
 
@@ -36,6 +36,16 @@ SSH proxy server with dynamic target routing via `LC_SSH_SERVER` or static routi
    - Reuses the client's SSH agent (`ssh -A` / `SSH_AUTH_SOCK`)
    - Prefers the same key that authenticated to the proxy
    - Uses `known_hosts` by default, with an optional `insecure_ignore_hostkey` config override for development
+
+6. **Keycloak SSO Second Factor** ✅ NEW
+   - Optional `sso` block in `config.json`, disabled by default
+   - Prints a browser verification link directly into the SSH terminal
+   - Adds a 2FA confirmation step to reduce the chance of unauthorized bastion access
+   - Waits up to `sso.auth_timeout_seconds` for approval before rejecting the session
+   - Supports `sso.poll_interval_seconds` and `sso.connect_timeout_seconds` for approval polling cadence and per-request Keycloak timeout control
+   - Uses a minimal default `scope` of `openid`, since profile/email claims are not required by the proxy
+   - Tested against a Keycloak realm named `ssh-proxy-server`
+   - Keycloak project: <https://www.keycloak.org/>
 
 ### Documentation
 

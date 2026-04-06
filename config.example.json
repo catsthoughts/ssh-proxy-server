@@ -17,5 +17,17 @@
       "backup-target:22"
     ],
     "mode": "failover"
+  },
+  "sso": {
+    "enabled": false,
+    "provider": "keycloak",
+    "base_url": "http://localhost:8080",
+    "realm": "ssh-proxy-server",
+    "client_id": "ssh-proxy-server",
+    "client_secret": "",
+    "scope": "openid",
+    "auth_timeout_seconds": 120,
+    "poll_interval_seconds": 5,
+    "connect_timeout_seconds": 10
   }
 }
