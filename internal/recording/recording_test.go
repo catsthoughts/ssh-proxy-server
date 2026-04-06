@@ -110,6 +110,27 @@ func TestGenerateRecordingID(t *testing.T) {
 	}
 }
 
+func TestAsciinemaRecorderConcurrentWriteAndClose(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "race.cast")
+	recorder := NewAsciinemaRecorder(filePath)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			_ = recorder.Write([]byte("output\n"))
+			_ = recorder.WriteInput([]byte("input\n"))
+		}
+	}()
+
+	_ = recorder.Close()
+	<-done
+
+	if err := recorder.Close(); err != nil {
+		t.Fatalf("second Close() returned error: %v", err)
+	}
+}
+
 func assertFrame(t *testing.T, line, wantType, wantData string) {
 	t.Helper()
 

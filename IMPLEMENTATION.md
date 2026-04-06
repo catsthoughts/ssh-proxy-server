@@ -79,7 +79,6 @@ The config file currently supports:
 A few runtime overrides are still supported:
 
 - `SSH_PROXY_AUTO_ACCEPT_CLIENT_KEYS` — sets the default value for `auto_accept_client_keys` in the JSON config
-- `SSH_PROXY_ALLOW_LOCAL_AGENT_FALLBACK=1` — allow fallback to the proxy host's local `SSH_AUTH_SOCK`
 - `SSH_PROXY_INSECURE_IGNORE_HOSTKEY=1` — sets the default value for `insecure_ignore_hostkey` in the JSON config
 
 ---
@@ -208,10 +207,7 @@ Current policy is configurable:
 
 ### Proxy → target authentication
 
-The proxy connects to the target host using the SSH agent available to the session:
-
-- preferred path: forwarded agent from `ssh -A`
-- development-only fallback: local `SSH_AUTH_SOCK`, enabled only when `SSH_PROXY_ALLOW_LOCAL_AGENT_FALLBACK=1`
+The proxy connects to the target host using the forwarded SSH agent from `ssh -A`.
 
 When possible, the proxy prefers the same public key that authenticated the client to the proxy.
 

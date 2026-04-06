@@ -147,12 +147,12 @@ func NewScriptRecorder(filePath string) *ScriptRecorder {
 
 // Write records output data.
 func (r *AsciinemaRecorder) Write(data []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	if !r.enabled || r.file == nil {
 		return nil
 	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	elapsed := time.Since(r.startTime).Seconds()
 	frame := []interface{}{elapsed, "o", string(data)}
@@ -169,12 +169,12 @@ func (r *AsciinemaRecorder) Write(data []byte) error {
 
 // WriteInput records input data.
 func (r *AsciinemaRecorder) WriteInput(data []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	if !r.enabled || r.file == nil {
 		return nil
 	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	elapsed := time.Since(r.startTime).Seconds()
 	frame := []interface{}{elapsed, "i", string(data)}
@@ -191,30 +191,33 @@ func (r *AsciinemaRecorder) WriteInput(data []byte) error {
 
 // Write appends transcript data to the script-format recording.
 func (r *ScriptRecorder) Write(data []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	if !r.enabled || r.file == nil {
 		return nil
 	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	_, err := r.file.Write(data)
 	return err
 }
 
 // WriteInput appends user input to the script-format recording.
 func (r *ScriptRecorder) WriteInput(data []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	if !r.enabled || r.file == nil {
 		return nil
 	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	_, err := r.file.Write(data)
 	return err
 }
 
 // Close closes the recording file.
 func (r *AsciinemaRecorder) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	if r.file == nil {
 		return nil
 	}
@@ -225,17 +228,18 @@ func (r *AsciinemaRecorder) Close() error {
 
 // Close closes the script transcript file.
 func (r *ScriptRecorder) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	if r.file == nil {
 		return nil
 	}
 
-	r.mu.Lock()
 	file := r.file
 	r.file = nil
 	if r.enabled {
 		_, _ = file.WriteString(fmt.Sprintf("\nScript done on %s\n", time.Now().Format(time.RFC3339)))
 	}
-	r.mu.Unlock()
 
 	return file.Close()
 }

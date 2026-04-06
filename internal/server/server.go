@@ -221,7 +221,7 @@ func handleChannel(channel ssh.Channel, requests <-chan *ssh.Request, state *typ
 			req.Reply(true, nil)
 
 		case "auth-agent-req@openssh.com":
-			state.AgentRequested = true
+			state.SetAgentRequested(true)
 			types.LogDebug("SSH agent forwarding requested by client")
 			req.Reply(true, nil)
 
@@ -263,9 +263,7 @@ func handleChannel(channel ssh.Channel, requests <-chan *ssh.Request, state *typ
 				req.Reply(false, nil)
 				continue
 			}
-			state.PtyTerm = term
-			state.PtyCols = parsedCols
-			state.PtyRows = parsedRows
+			state.SetPTY(term, parsedCols, parsedRows)
 			cols, rows = parsedCols, parsedRows
 			types.LogDebug("PTY request: term=%s cols=%d rows=%d", term, parsedCols, parsedRows)
 			req.Reply(true, nil)
@@ -273,14 +271,14 @@ func handleChannel(channel ssh.Channel, requests <-chan *ssh.Request, state *typ
 		case "window-change":
 			req.Reply(true, nil)
 			parseWindowChange(req.Payload, &cols, &rows)
-			state.PtyCols = cols
-			state.PtyRows = rows
+			state.SetWindowSize(cols, rows)
 			types.LogDebug("Window change: cols=%d rows=%d", cols, rows)
-			if state.TargetSession != nil {
-				if err := state.TargetSession.WindowChange(rows, cols); err != nil {
-					types.LogDebug("Failed to forward window change to target %s: %v", formatTargetAddress(state.TargetUser, state.TargetHost, state.TargetPort), err)
+			if targetSession := state.TargetSessionValue(); targetSession != nil {
+				targetUser, targetHost, targetPort := state.Target()
+				if err := targetSession.WindowChange(rows, cols); err != nil {
+					types.LogDebug("Failed to forward window change to target %s: %v", formatTargetAddress(targetUser, targetHost, targetPort), err)
 				} else {
-					types.LogDebug("Forwarded window change to target %s: cols=%d rows=%d", formatTargetAddress(state.TargetUser, state.TargetHost, state.TargetPort), cols, rows)
+					types.LogDebug("Forwarded window change to target %s: cols=%d rows=%d", formatTargetAddress(targetUser, targetHost, targetPort), cols, rows)
 				}
 			}
 
@@ -350,7 +348,7 @@ func handleExecProxy(channel ssh.Channel, state *types.SessionState, command str
 }
 
 func ensureSSOAuthentication(channel ssh.Channel, state *types.SessionState) error {
-	if state == nil || !state.SSOEnabled || state.SSOVerified {
+	if state == nil || !state.SSOEnabled || state.IsSSOVerified() {
 		return nil
 	}
 
@@ -395,7 +393,7 @@ func ensureSSOAuthentication(channel ssh.Channel, state *types.SessionState) err
 		}
 		types.LogInfo("SSO identity matched SSH user: client=%s identity=%s", clientUser, identity.BestIdentifier())
 	}
-	state.SSOVerified = true
+	state.SetSSOVerified(true)
 	metrics.RecordSSOConfirmation("success")
 	types.LogInfo("SSO confirmation successful: client=%s provider=%s realm=%s", clientUser, cfg.Provider, cfg.Realm)
 	return nil
@@ -447,17 +445,15 @@ func handleEnvRequest(req *ssh.Request, state *types.SessionState) {
 			return
 		}
 
-		state.EnvVars[varName] = varValue
+		state.SetEnvVar(varName, varValue)
 		types.LogDebug("Received environment variable: %s=%s", varName, varValue)
-		state.TargetUser = targetUser
-		state.TargetHost = targetHost
-		state.TargetPort = targetPort
+		state.SetTarget(targetUser, targetHost, targetPort)
 		types.LogInfo("Target parsed from LC_SSH_SERVER: user=%s host=%s port=%s", targetUser, targetHost, targetPort)
 		req.Reply(true, nil)
 		return
 	}
 
-	state.EnvVars[varName] = varValue
+	state.SetEnvVar(varName, varValue)
 	types.LogDebug("Received environment variable: %s=%s", varName, varValue)
 	req.Reply(true, nil)
 }
@@ -473,27 +469,25 @@ func proxySession(channel ssh.Channel, state *types.SessionState, targetAddr, co
 		return err
 	}
 	defer targetClient.Close()
-	state.TargetClient = targetClient
-	state.TargetUser = targetUser
-	state.TargetHost = targetHost
-	state.TargetPort = targetPort
+	state.SetTargetClient(targetClient)
+	state.SetTarget(targetUser, targetHost, targetPort)
 	defer func() {
-		state.TargetClient = nil
+		state.SetTargetClient(nil)
 	}()
 
 	targetSession, err := targetClient.NewSession()
 	if err != nil {
 		return fmt.Errorf("failed to create target session: %w", err)
 	}
-	state.TargetSession = targetSession
+	state.SetTargetSession(targetSession)
 	defer func() {
-		state.TargetSession = nil
+		state.SetTargetSession(nil)
 		targetSession.Close()
 	}()
 
 	recordingID := generateRecordingID()
 	recordingFormat := recording.NormalizeFormat(state.RecordingFormat)
-	recordingFileName := buildRecordingFileName(state.TargetUser, state.TargetHost, state.TargetPort, recordingID, recordingFormat)
+	recordingFileName := buildRecordingFileName(targetUser, targetHost, targetPort, recordingID, recordingFormat)
 	recordingsDir := state.RecordingsDir
 	if strings.TrimSpace(recordingsDir) == "" {
 		recordingsDir = "recordings"
@@ -506,11 +500,15 @@ func proxySession(channel ssh.Channel, state *types.SessionState, targetAddr, co
 		return fmt.Errorf("failed to secure recordings directory permissions: %w", err)
 	}
 
-	state.Recorder, err = recording.NewRecorder(recordingFormat, recordingPath)
+	recorder, err := recording.NewRecorder(recordingFormat, recordingPath)
 	if err != nil {
 		return fmt.Errorf("failed to create %s recorder: %w", recordingFormat, err)
 	}
-	defer state.Recorder.Close()
+	state.SetRecorder(recorder)
+	defer func() {
+		state.SetRecorder(nil)
+		_ = recorder.Close()
+	}()
 
 	stdinPipe, err := targetSession.StdinPipe()
 	if err != nil {
@@ -525,18 +523,17 @@ func proxySession(channel ssh.Channel, state *types.SessionState, targetAddr, co
 		return fmt.Errorf("failed to open target stderr pipe: %w", err)
 	}
 
-	applySessionEnv(targetSession, state.EnvVars)
+	applySessionEnv(targetSession, state.EnvVarsSnapshot())
 
-	if state.PtyTerm != "" {
-		cols := state.PtyCols
-		rows := state.PtyRows
+	term, cols, rows := state.PTY()
+	if term != "" {
 		if cols == 0 {
 			cols = 80
 		}
 		if rows == 0 {
 			rows = 24
 		}
-		if err := targetSession.RequestPty(state.PtyTerm, rows, cols, ssh.TerminalModes{
+		if err := targetSession.RequestPty(term, rows, cols, ssh.TerminalModes{
 			ssh.ECHO:          1,
 			ssh.TTY_OP_ISPEED: 14400,
 			ssh.TTY_OP_OSPEED: 14400,
@@ -574,7 +571,7 @@ func resolveTargetCandidates(state *types.SessionState, targetAddr, command stri
 
 	resolved := strings.TrimSpace(targetAddr)
 	if resolved == "" && state != nil {
-		resolved = strings.TrimSpace(state.EnvVars["LC_SSH_SERVER"])
+		resolved = strings.TrimSpace(state.GetEnvVar("LC_SSH_SERVER"))
 	}
 	if resolved == "" && strings.TrimSpace(command) != "" {
 		resolved = parseTargetFromCommand(command)
@@ -633,9 +630,7 @@ func connectToFirstAvailableTarget(state *types.SessionState, targets []string) 
 				continue
 			}
 			if state != nil {
-				state.TargetUser = targetUser
-				state.TargetHost = targetHost
-				state.TargetPort = targetPort
+				state.SetTarget(targetUser, targetHost, targetPort)
 			}
 
 			formattedTarget := formatTargetAddress(targetUser, targetHost, targetPort)
@@ -807,7 +802,8 @@ func parsePtyRequest(payload []byte) (string, int, int, error) {
 }
 
 func finalizeRemoteSession(channel ssh.Channel, state *types.SessionState, err error) error {
-	target := formatTargetAddress(state.TargetUser, state.TargetHost, state.TargetPort)
+	targetUser, targetHost, targetPort := state.Target()
+	target := formatTargetAddress(targetUser, targetHost, targetPort)
 
 	if err == nil {
 		types.LogInfo("Session ended: client=%s target=%s exit_status=0", state.ClientUser, target)
@@ -846,8 +842,10 @@ func closeClientSession(channel ssh.Channel, state *types.SessionState) {
 func copySessionInput(src io.Reader, dst io.WriteCloser, state *types.SessionState) {
 	defer dst.Close()
 
-	_, err := io.Copy(io.MultiWriter(dst, inputRecorderWriter{recorder: state.Recorder}), src)
-	target := formatTargetAddress(state.TargetUser, state.TargetHost, state.TargetPort)
+	recorder := state.RecorderValue()
+	_, err := io.Copy(io.MultiWriter(dst, inputRecorderWriter{recorder: recorder}), src)
+	targetUser, targetHost, targetPort := state.Target()
+	target := formatTargetAddress(targetUser, targetHost, targetPort)
 
 	if err == nil || errors.Is(err, io.EOF) {
 		types.LogInfo("User input closed: client=%s target=%s", state.ClientUser, target)
@@ -858,9 +856,11 @@ func copySessionInput(src io.Reader, dst io.WriteCloser, state *types.SessionSta
 }
 
 func copySessionOutput(dst io.Writer, src io.Reader, state *types.SessionState, streamName string) {
-	_, err := io.Copy(io.MultiWriter(dst, outputRecorderWriter{recorder: state.Recorder}), src)
+	recorder := state.RecorderValue()
+	_, err := io.Copy(io.MultiWriter(dst, outputRecorderWriter{recorder: recorder}), src)
 	if err != nil && !errors.Is(err, io.EOF) {
-		types.LogDebug("Output stream %s ended with error for target %s: %v", streamName, formatTargetAddress(state.TargetUser, state.TargetHost, state.TargetPort), err)
+		targetUser, targetHost, targetPort := state.Target()
+		types.LogDebug("Output stream %s ended with error for target %s: %v", streamName, formatTargetAddress(targetUser, targetHost, targetPort), err)
 	}
 }
 

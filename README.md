@@ -134,7 +134,7 @@ You can store recordings in a custom directory by setting `"recordings_dir": "/p
 **Dynamic routing: Using SendEnv to specify target**
 
 When `static_routing.enabled` is `false`, the proxy requires the target host to be specified via the `LC_SSH_SERVER` environment variable using SSH's SendEnv option.
-Use `ssh -A` so the proxy can authenticate to the target with your SSH agent. The username from the SSH session to the proxy is reused for the final target login unless you still provide a legacy `user@host[:port]` route. By default, the proxy rejects local-agent fallback and requires a forwarded agent:
+Use `ssh -A` so the proxy can authenticate to the target with your forwarded SSH agent. The username from the SSH session to the proxy is reused for the final target login unless you still provide a legacy `user@host[:port]` route:
 
 ```bash
 LC_SSH_SERVER="target-host[:port]" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 your-user@localhost
@@ -320,7 +320,6 @@ ssh your-user@target-host.example.com
 For development-only scenarios, the following options are available:
 - `authorized_keys` in `config.json` — use a custom allowlist path for proxy login
 - `auto_accept_client_keys` in `config.json` — set to `false` to enforce the allowlist
-- `SSH_PROXY_ALLOW_LOCAL_AGENT_FALLBACK=1` — allow fallback to the proxy host's local `SSH_AUTH_SOCK`
 - `insecure_ignore_hostkey` in `config.json` — bypass `known_hosts` verification for target connections
 - `SSH_PROXY_INSECURE_IGNORE_HOSTKEY=1` — sets the default for `insecure_ignore_hostkey`
 

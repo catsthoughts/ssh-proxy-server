@@ -1,7 +1,6 @@
 package client
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -17,16 +16,16 @@ func TestGetHostKeyCallbackRequiresKnownHostsByDefault(t *testing.T) {
 	}
 }
 
-func TestGetHostKeyCallbackAllowsExplicitInsecureFallback(t *testing.T) {
+func TestGetHostKeyCallbackAllowsExplicitInsecureOverrideEnv(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("SSH_PROXY_INSECURE_IGNORE_HOSTKEY", "1")
 
 	if _, err := getHostKeyCallback(nil); err != nil {
-		t.Fatalf("getHostKeyCallback() returned error with explicit insecure fallback: %v", err)
+		t.Fatalf("getHostKeyCallback() returned error with explicit insecure override env: %v", err)
 	}
 }
 
-func TestGetHostKeyCallbackAllowsExplicitInsecureFlag(t *testing.T) {
+func TestGetHostKeyCallbackAllowsExplicitInsecureStateFlag(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("SSH_PROXY_INSECURE_IGNORE_HOSTKEY", "")
 
@@ -36,13 +35,10 @@ func TestGetHostKeyCallbackAllowsExplicitInsecureFlag(t *testing.T) {
 	}
 }
 
-func TestGetSSHAgentConnRejectsLocalFallbackByDefault(t *testing.T) {
-	t.Setenv("SSH_PROXY_ALLOW_LOCAL_AGENT_FALLBACK", "")
-	t.Setenv("SSH_AUTH_SOCK", filepath.Join(t.TempDir(), "agent.sock"))
-
+func TestGetSSHAgentConnRequiresForwardedAgent(t *testing.T) {
 	_, err := GetSSHAgentConn(nil)
 	if err == nil {
-		t.Fatal("expected GetSSHAgentConn() to reject local agent fallback by default")
+		t.Fatal("expected GetSSHAgentConn() to require forwarded SSH agent access")
 	}
 	if !strings.Contains(err.Error(), "ssh -A") && !strings.Contains(strings.ToLower(err.Error()), "forward") {
 		t.Fatalf("expected forwarded-agent error, got %q", err.Error())

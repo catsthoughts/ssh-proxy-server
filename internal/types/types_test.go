@@ -68,3 +68,40 @@ func TestSetLogLevelInvalidExits(t *testing.T) {
 		t.Fatal("expected non-zero exit status for invalid log level")
 	}
 }
+
+func TestSessionStateSynchronizedAccessors(t *testing.T) {
+	state := &SessionState{EnvVars: make(map[string]string)}
+
+	state.SetAgentRequested(true)
+	if !state.IsAgentRequested() {
+		t.Fatal("expected AgentRequested to be true")
+	}
+
+	state.SetSSOVerified(true)
+	if !state.IsSSOVerified() {
+		t.Fatal("expected SSOVerified to be true")
+	}
+
+	state.SetEnvVar("LC_SSH_SERVER", "example.com:2222")
+	if got := state.GetEnvVar("LC_SSH_SERVER"); got != "example.com:2222" {
+		t.Fatalf("GetEnvVar() = %q, want %q", got, "example.com:2222")
+	}
+
+	envCopy := state.EnvVarsSnapshot()
+	envCopy["LC_SSH_SERVER"] = "mutated"
+	if got := state.GetEnvVar("LC_SSH_SERVER"); got != "example.com:2222" {
+		t.Fatalf("expected state env to be unchanged by snapshot mutation, got %q", got)
+	}
+
+	state.SetTarget("alice", "example.com", "22")
+	user, host, port := state.Target()
+	if user != "alice" || host != "example.com" || port != "22" {
+		t.Fatalf("Target() = (%q, %q, %q), want (%q, %q, %q)", user, host, port, "alice", "example.com", "22")
+	}
+
+	state.SetPTY("xterm-256color", 120, 40)
+	term, cols, rows := state.PTY()
+	if term != "xterm-256color" || cols != 120 || rows != 40 {
+		t.Fatalf("PTY() = (%q, %d, %d), want (%q, %d, %d)", term, cols, rows, "xterm-256color", 120, 40)
+	}
+}
