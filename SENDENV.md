@@ -21,7 +21,7 @@ If `:port` is omitted, the proxy defaults to `22`.
 ### 1. Start the proxy
 
 ```bash
-./ssh-proxy-server -listen localhost:2222 -key ./ssh_host_key -log-level info -recordings-dir ./recordings
+./ssh-proxy-server -config ./config.json
 ```
 
 ### 2. Connect through it
@@ -69,10 +69,10 @@ LC_SSH_SERVER="user@target-host:22" ssh my-proxy
 
 - `LC_SSH_SERVER` parsing from SSH `env` requests
 - interactive `shell` sessions by default
-- optional `exec` requests when the proxy is started with `-allow-direct-commands`
+- optional `exec` requests when `allow_direct_commands` is enabled in the JSON config
 - PTY allocation via `pty-req`
 - live terminal resize via `window-change`
-- session recording in either `asciinema` (`.cast`) or plain `script` transcript (`.log`) format via `-recording-format`
+- session recording in either `asciinema` (`.cast`) or plain `script` transcript (`.log`) format via the `recording_format` config setting
 
 ## Troubleshooting
 
@@ -100,7 +100,7 @@ ssh-add ~/.ssh/id_rsa
 
 ### Host key verification issues on the target
 
-The proxy requires `~/.ssh/known_hosts` for target verification by default. For temporary development-only use, you can override this by starting the proxy with `-insecure-ignore-hostkey` or by setting `SSH_PROXY_INSECURE_IGNORE_HOSTKEY=1`.
+The proxy requires `~/.ssh/known_hosts` for target verification by default. For temporary development-only use, you can override this by setting `"insecure_ignore_hostkey": true` in the JSON config or by setting `SSH_PROXY_INSECURE_IGNORE_HOSTKEY=1`.
 
 ## Notes
 
@@ -111,7 +111,7 @@ The proxy requires `~/.ssh/known_hosts` for target verification by default. For 
 
 ```text
 recordings/<user>_<host>_<port>_<session-id>.cast
-# or .log when started with -recording-format script
+# or .log when `"recording_format": "script"` is set in the JSON config
 ```
 
 ## Comparison with Alternatives

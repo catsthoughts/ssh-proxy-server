@@ -6,7 +6,7 @@ The project is a working Go-based SSH proxy for bastion-style access, auditing, 
 
 1. accepts inbound SSH connections with public key authentication
 2. routes sessions using `LC_SSH_SERVER=user@host[:port]`
-3. proxies interactive `shell` sessions by default and enables `exec` commands only when started with `-allow-direct-commands`
+3. proxies interactive `shell` sessions by default and enables `exec` commands only when `allow_direct_commands` is set in the JSON config
 4. authenticates to the target host using the client's SSH agent
 5. records full session input/output in either `asciinema` v2 or plain `script` transcript format
 6. forwards PTY allocation and terminal resize events
@@ -26,7 +26,7 @@ SSH proxy server
   ├─ parses LC_SSH_SERVER → user / host / port
   ├─ opens an outbound SSH connection to the target
   ├─ authenticates to the target using the forwarded SSH agent
-  ├─ starts an interactive shell session by default, or an exec session only when `-allow-direct-commands` is enabled
+  ├─ starts an interactive shell session by default, or an exec session only when `allow_direct_commands` is enabled in the JSON config
   ├─ proxies stdin/stdout/stderr bidirectionally
   ├─ records the session to a `.cast` file
   └─ forwards PTY resize events to the target
@@ -40,25 +40,31 @@ Target SSH host
 
 ### Command-line flags
 
-The proxy is started from `cmd/ssh-proxy-server/main.go` and currently supports:
+The proxy is started from `cmd/ssh-proxy-server/main.go` with a single required flag:
 
-- `-listen` — address to listen on, default `localhost:2222`
-- `-key` — path to the SSH host key file
-- `-log-level` — `error`, `info`, or `debug`
-- `-recordings-dir` — directory where `.cast` recordings are stored
-- `-authorized-keys` — path to the proxy-side `authorized_keys` file, default `~/.ssh/authorized_keys`
-- `-auto-accept-client-keys` — whether to accept client public keys automatically, default `true`
-- `-allow-direct-commands` — allow SSH `exec` requests (direct command execution), default `false`
-- `-recording-format` — choose `asciinema` or `script` recording output, default `asciinema`
-- `-insecure-ignore-hostkey` — disable target `known_hosts` verification (insecure; temporary development use only), default `false`
+- `-config` — path to the JSON config file that contains all runtime settings
+
+### JSON config fields
+
+The config file currently supports:
+
+- `listen` — address to listen on, default `localhost:2222`
+- `key` — path to the SSH host key file
+- `log_level` — `error`, `info`, or `debug`
+- `recordings_dir` — directory where recordings are stored
+- `authorized_keys` — path to the proxy-side `authorized_keys` file, default `~/.ssh/authorized_keys`
+- `auto_accept_client_keys` — whether to accept client public keys automatically, default `true`
+- `allow_direct_commands` — allow SSH `exec` requests (direct command execution), default `false`
+- `recording_format` — choose `asciinema` or `script` recording output, default `asciinema`
+- `insecure_ignore_hostkey` — disable target `known_hosts` verification (insecure; temporary development use only), default `false`
 
 ### Security-related environment variables
 
 A few runtime overrides are still supported:
 
-- `SSH_PROXY_AUTO_ACCEPT_CLIENT_KEYS` — sets the default value for `-auto-accept-client-keys`
+- `SSH_PROXY_AUTO_ACCEPT_CLIENT_KEYS` — sets the default value for `auto_accept_client_keys` in the JSON config
 - `SSH_PROXY_ALLOW_LOCAL_AGENT_FALLBACK=1` — allow fallback to the proxy host's local `SSH_AUTH_SOCK`
-- `SSH_PROXY_INSECURE_IGNORE_HOSTKEY=1` — bypass `known_hosts` verification for development-only use
+- `SSH_PROXY_INSECURE_IGNORE_HOSTKEY=1` — sets the default value for `insecure_ignore_hostkey` in the JSON config
 
 ---
 
@@ -98,7 +104,7 @@ Implements outbound SSH connectivity to the target host:
 - prefers the same key that authenticated to the proxy when possible
 - requires forwarded SSH agent access by default
 - loads `~/.ssh/known_hosts` for host verification
-- allows explicit insecure host-key fallback via `-insecure-ignore-hostkey` or the `SSH_PROXY_INSECURE_IGNORE_HOSTKEY` env override
+- allows explicit insecure host-key fallback via `insecure_ignore_hostkey` in the JSON config or the `SSH_PROXY_INSECURE_IGNORE_HOSTKEY` env override
 
 ### `internal/hostkey/hostkey.go`
 Manages the proxy server host key:
@@ -172,8 +178,8 @@ Incoming clients authenticate with an SSH public key.
 
 Current policy is configurable:
 
-- by default, `-auto-accept-client-keys=true` accepts client keys automatically
-- if `-auto-accept-client-keys=false`, the presented key must be found in the file passed by `-authorized-keys`
+- by default, `auto_accept_client_keys=true` accepts client keys automatically
+- if `auto_accept_client_keys=false`, the presented key must be found in the file passed by `authorized_keys`
 
 ### Proxy → target authentication
 
@@ -190,7 +196,7 @@ For target verification:
 
 - default behavior uses `~/.ssh/known_hosts`
 - if `known_hosts` is unavailable or the key mismatches, the connection fails closed
-- insecure bypass is available via `-insecure-ignore-hostkey` or `SSH_PROXY_INSECURE_IGNORE_HOSTKEY=1` for temporary development-only use
+- insecure bypass is available via `insecure_ignore_hostkey` in the JSON config or `SSH_PROXY_INSECURE_IGNORE_HOSTKEY=1` for temporary development-only use
 
 ---
 
@@ -205,7 +211,7 @@ The current server handles these session-level requests:
 - `pty-req`
 - `window-change`
 - `shell`
-- `exec` (rejected unless `-allow-direct-commands` is enabled)
+- `exec` (rejected unless `allow_direct_commands` is enabled in the JSON config)
 
 Unsupported or unknown request types are rejected.
 
@@ -214,7 +220,7 @@ Unsupported or unknown request types are rejected.
 Interactive terminal access is the default behavior:
 
 - `shell` → starts a remote interactive shell
-- `exec` → is rejected by default; when `-allow-direct-commands=true` is set, it runs the requested remote command and returns the exit status
+- `exec` → is rejected by default; when `allow_direct_commands=true` is set in the JSON config, it runs the requested remote command and returns the exit status
 
 ### PTY and resize forwarding
 
@@ -238,8 +244,8 @@ On clean termination:
 
 ## Recording implementation
 
-Recordings are written as asciinema v2 `.cast` files under the directory configured by `-recordings-dir`.
-If the flag is omitted, the default directory is `./recordings/`.
+Recordings are written under the directory configured by `recordings_dir` in the JSON config.
+If that setting is omitted, the default directory is `./recordings/`.
 
 ### Permissions
 
@@ -281,7 +287,7 @@ The proxy supports three log levels:
 Example startup:
 
 ```bash
-./ssh-proxy-server -listen localhost:2222 -key ./ssh_host_key -log-level debug -recordings-dir ./recordings
+./ssh-proxy-server -config ./config.json
 ```
 
 ### Typical log events
@@ -303,7 +309,7 @@ Example startup:
 The implementation is functional and suitable for controlled environments, but several areas remain intentionally simple:
 
 1. **Client auth defaults are permissive**
-   - `-auto-accept-client-keys=true` is convenient for development but not the strictest production posture
+   - `auto_accept_client_keys=true` is convenient for development but not the strictest production posture
 
 2. **Routing variable is fixed**
    - the proxy currently expects `LC_SSH_SERVER`
@@ -312,8 +318,8 @@ The implementation is functional and suitable for controlled environments, but s
 3. **No per-user or per-target ACL layer**
    - there is no host allowlist/denylist or per-user access policy yet
 
-4. **No external config file**
-   - configuration is currently flag-driven and minimal
+4. **Config remains intentionally simple**
+   - configuration is now JSON-driven via `-config`, but it does not yet support profiles, includes, or live reload
 
 5. **No rate limiting or connection throttling**
    - repeated authentication attempts are not currently limited
@@ -331,13 +337,8 @@ go build -o ssh-proxy-server ./cmd/ssh-proxy-server
 ### Run
 
 ```bash
-./ssh-proxy-server \
-  -listen localhost:2222 \
-  -key ./ssh_host_key \
-  -log-level info \
-  -recordings-dir ./recordings \
-  -authorized-keys ~/.ssh/authorized_keys \
-  -auto-accept-client-keys=true
+cp ./config.example.json ./config.json
+./ssh-proxy-server -config ./config.json
 ```
 
 ### Connect
