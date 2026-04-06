@@ -1,6 +1,8 @@
 package client
 
 import (
+	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -36,13 +38,36 @@ func TestGetHostKeyCallbackAllowsExplicitInsecureFlag(t *testing.T) {
 	}
 }
 
-func TestGetSSHAgentConnRejectsLocalFallbackByDefault(t *testing.T) {
-	t.Setenv("SSH_PROXY_ALLOW_LOCAL_AGENT_FALLBACK", "")
-	t.Setenv("SSH_AUTH_SOCK", filepath.Join(t.TempDir(), "agent.sock"))
+func TestGetSSHAgentConnRequiresForwardedAgentEvenWhenFallbackEnvIsSet(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), filepath.Base(t.TempDir())+".sock")
+	_ = os.Remove(sockPath)
+	defer os.Remove(sockPath)
 
-	_, err := GetSSHAgentConn(nil)
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("failed to create test unix socket: %v", err)
+	}
+	defer listener.Close()
+
+	accepted := make(chan struct{})
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			close(accepted)
+			_ = conn.Close()
+		}
+	}()
+
+	t.Setenv("SSH_PROXY_ALLOW_LOCAL_AGENT_FALLBACK", "1")
+	t.Setenv("SSH_AUTH_SOCK", sockPath)
+
+	_, err = GetSSHAgentConn(nil)
+	select {
+	case <-accepted:
+	default:
+	}
 	if err == nil {
-		t.Fatal("expected GetSSHAgentConn() to reject local agent fallback by default")
+		t.Fatal("expected GetSSHAgentConn() to reject local SSH agent fallback")
 	}
 	if !strings.Contains(err.Error(), "ssh -A") && !strings.Contains(strings.ToLower(err.Error()), "forward") {
 		t.Fatalf("expected forwarded-agent error, got %q", err.Error())

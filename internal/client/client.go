@@ -20,8 +20,7 @@ import (
 )
 
 const (
-	allowLocalAgentFallbackEnv = "SSH_PROXY_ALLOW_LOCAL_AGENT_FALLBACK"
-	insecureIgnoreHostKeyEnv   = "SSH_PROXY_INSECURE_IGNORE_HOSTKEY"
+	insecureIgnoreHostKeyEnv = "SSH_PROXY_INSECURE_IGNORE_HOSTKEY"
 )
 
 func envEnabled(name string) bool {
@@ -182,33 +181,16 @@ func BidiProxy(clientChan io.ReadWriteCloser, targetChan io.ReadWriteCloser, rec
 	return err2
 }
 
-// GetSSHAgentConn gets a connection to a forwarded SSH agent or, when explicitly enabled,
-// the local SSH agent for development-only use.
+// GetSSHAgentConn gets a connection to the forwarded SSH agent for the current client session.
 func GetSSHAgentConn(state *types.SessionState) (agent.Agent, error) {
-	if state != nil && state.AgentRequested && state.ClientConn != nil {
+	if state != nil && state.IsAgentRequested() && state.ClientConn != nil {
 		agentChannel, requests, err := state.ClientConn.OpenChannel("auth-agent@openssh.com", nil)
 		if err == nil {
 			go ssh.DiscardRequests(requests)
 			return agent.NewClient(agentChannel), nil
 		}
-		if !envEnabled(allowLocalAgentFallbackEnv) {
-			return nil, fmt.Errorf("forwarded SSH agent could not be opened: %w", err)
-		}
+		return nil, fmt.Errorf("forwarded SSH agent could not be opened: %w", err)
 	}
 
-	if !envEnabled(allowLocalAgentFallbackEnv) {
-		return nil, fmt.Errorf("SSH agent forwarding is required; connect with ssh -A (set %s=1 only for temporary development use)", allowLocalAgentFallbackEnv)
-	}
-
-	agentSocket := os.Getenv("SSH_AUTH_SOCK")
-	if agentSocket == "" {
-		return nil, fmt.Errorf("SSH agent is unavailable: set SSH_AUTH_SOCK or connect with ssh -A")
-	}
-
-	agentConn, err := net.Dial("unix", agentSocket)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to SSH agent at %s: %w", agentSocket, err)
-	}
-
-	return agent.NewClient(agentConn), nil
+	return nil, fmt.Errorf("SSH agent forwarding is required; connect with ssh -A")
 }
