@@ -43,16 +43,17 @@ type RoutingConfig struct {
 }
 
 type SSOConfig struct {
-	Enabled        bool
-	Provider       string
-	BaseURL        string
-	Realm          string
-	ClientID       string
-	ClientSecret   string
-	Scope          string
-	AuthTimeout    time.Duration
-	PollInterval   time.Duration
-	RequestTimeout time.Duration
+	Enabled          bool
+	Provider         string
+	BaseURL          string
+	Realm            string
+	ClientID         string
+	ClientSecret     string
+	Scope            string
+	AuthTimeout      time.Duration
+	PollInterval     time.Duration
+	RequestTimeout   time.Duration
+	EnforceUserMatch bool
 }
 
 func NormalizeRoutingMode(mode string) string {
@@ -136,6 +137,7 @@ func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir, authoriz
 		SSOAuthTimeout:        ssoConfig.AuthTimeout,
 		SSOPollInterval:       ssoConfig.PollInterval,
 		SSORequestTimeout:     ssoConfig.RequestTimeout,
+		SSOEnforceUserMatch:   ssoConfig.EnforceUserMatch,
 		RecordingsDir:         recordingsDir,
 		EnvVars:               make(map[string]string),
 	}
@@ -357,9 +359,20 @@ func ensureSSOAuthentication(channel ssh.Channel, state *types.SessionState) err
 		PollInterval:   state.SSOPollInterval,
 		RequestTimeout: state.SSORequestTimeout,
 	}
-	if err := runSSODeviceAuth(context.Background(), cfg, channel); err != nil {
+	identity, err := runSSODeviceAuth(context.Background(), cfg, channel)
+	if err != nil {
 		types.LogInfo("SSO confirmation failed: client=%s provider=%s realm=%s err=%v", clientUser, cfg.Provider, cfg.Realm, err)
 		return err
+	}
+	if state.SSOEnforceUserMatch {
+		if !identity.MatchesSSHUser(clientUser) {
+			identifier := identity.BestIdentifier()
+			if identifier == "" {
+				return fmt.Errorf("SSO confirmation succeeded but did not provide an identity that can be matched to SSH user %q", clientUser)
+			}
+			return fmt.Errorf("SSO identity %q does not match SSH user %q", identifier, clientUser)
+		}
+		types.LogInfo("SSO identity matched SSH user: client=%s identity=%s", clientUser, identity.BestIdentifier())
 	}
 	state.SSOVerified = true
 	types.LogInfo("SSO confirmation successful: client=%s provider=%s realm=%s", clientUser, cfg.Provider, cfg.Realm)

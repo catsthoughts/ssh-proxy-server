@@ -43,6 +43,7 @@ SSH proxy server with dynamic target routing via `LC_SSH_SERVER` or static routi
    - Adds a 2FA confirmation step to reduce the chance of unauthorized bastion access
    - Waits up to `sso.auth_timeout_seconds` for approval before rejecting the session
    - Supports `sso.poll_interval_seconds` and `sso.connect_timeout_seconds` for approval polling cadence and per-request Keycloak timeout control
+   - Supports `sso.enforce_ssh_user_match` to bind the approved Keycloak identity to the SSH username, with an explicit opt-out switch in config
    - Uses a minimal default `scope` of `openid`, since profile/email claims are not required by the proxy
    - Tested against a Keycloak realm named `ssh-proxy-server`
    - Keycloak project: <https://www.keycloak.org/>

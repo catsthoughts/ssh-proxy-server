@@ -53,7 +53,7 @@ func main() {
 		types.LogInfo("Dynamic routing enabled: target is expected from LC_SSH_SERVER")
 	}
 	if cfg.SSO.Enabled {
-		types.LogInfo("SSO second factor enabled: provider=%s base_url=%s realm=%s timeout=%ds poll_interval=%ds connect_timeout=%ds", cfg.SSO.Provider, cfg.SSO.BaseURL, cfg.SSO.Realm, cfg.SSO.AuthTimeoutSeconds, cfg.SSO.PollIntervalSeconds, cfg.SSO.ConnectTimeoutSeconds)
+		types.LogInfo("SSO second factor enabled: provider=%s base_url=%s realm=%s timeout=%ds poll_interval=%ds connect_timeout=%ds enforce_user_match=%t", cfg.SSO.Provider, cfg.SSO.BaseURL, cfg.SSO.Realm, cfg.SSO.AuthTimeoutSeconds, cfg.SSO.PollIntervalSeconds, cfg.SSO.ConnectTimeoutSeconds, cfg.SSO.EnforceSSHUserMatch)
 	} else {
 		types.LogInfo("SSO second factor is disabled")
 	}
@@ -66,16 +66,17 @@ func main() {
 		Retries:        cfg.Retries,
 	}
 	ssoConfig := server.SSOConfig{
-		Enabled:        cfg.SSO.Enabled,
-		Provider:       cfg.SSO.Provider,
-		BaseURL:        cfg.SSO.BaseURL,
-		Realm:          cfg.SSO.Realm,
-		ClientID:       cfg.SSO.ClientID,
-		ClientSecret:   cfg.SSO.ClientSecret,
-		Scope:          cfg.SSO.Scope,
-		AuthTimeout:    time.Duration(cfg.SSO.AuthTimeoutSeconds) * time.Second,
-		PollInterval:   time.Duration(cfg.SSO.PollIntervalSeconds) * time.Second,
-		RequestTimeout: time.Duration(cfg.SSO.ConnectTimeoutSeconds) * time.Second,
+		Enabled:          cfg.SSO.Enabled,
+		Provider:         cfg.SSO.Provider,
+		BaseURL:          cfg.SSO.BaseURL,
+		Realm:            cfg.SSO.Realm,
+		ClientID:         cfg.SSO.ClientID,
+		ClientSecret:     cfg.SSO.ClientSecret,
+		Scope:            cfg.SSO.Scope,
+		AuthTimeout:      time.Duration(cfg.SSO.AuthTimeoutSeconds) * time.Second,
+		PollInterval:     time.Duration(cfg.SSO.PollIntervalSeconds) * time.Second,
+		RequestTimeout:   time.Duration(cfg.SSO.ConnectTimeoutSeconds) * time.Second,
+		EnforceUserMatch: cfg.SSO.EnforceSSHUserMatch,
 	}
 
 	hostKey, err := hostkey.LoadOrGenerateHostKey(cfg.Key)

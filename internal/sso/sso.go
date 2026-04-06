@@ -2,6 +2,7 @@ package sso
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,16 +24,55 @@ const (
 )
 
 type Config struct {
-	Enabled        bool
-	Provider       string
-	BaseURL        string
-	Realm          string
-	ClientID       string
-	ClientSecret   string
-	Scope          string
-	AuthTimeout    time.Duration
-	PollInterval   time.Duration
-	RequestTimeout time.Duration
+	Enabled          bool
+	Provider         string
+	BaseURL          string
+	Realm            string
+	ClientID         string
+	ClientSecret     string
+	Scope            string
+	AuthTimeout      time.Duration
+	PollInterval     time.Duration
+	RequestTimeout   time.Duration
+	EnforceUserMatch bool
+}
+
+// Identity represents the user identity returned by the SSO provider.
+type Identity struct {
+	Subject           string
+	PreferredUsername string
+	Email             string
+}
+
+func (i Identity) BestIdentifier() string {
+	for _, value := range []string{i.PreferredUsername, i.Email, i.Subject} {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func (i Identity) MatchesSSHUser(user string) bool {
+	user = strings.ToLower(strings.TrimSpace(user))
+	if user == "" {
+		return false
+	}
+
+	candidates := []string{i.PreferredUsername, i.Email, i.Subject}
+	for _, candidate := range candidates {
+		candidate = strings.ToLower(strings.TrimSpace(candidate))
+		if candidate == "" {
+			continue
+		}
+		if candidate == user {
+			return true
+		}
+		if at := strings.Index(candidate, "@"); at > 0 && candidate[:at] == user {
+			return true
+		}
+	}
+	return false
 }
 
 type discoveryDocument struct {
@@ -54,6 +94,12 @@ type tokenErrorResponse struct {
 	ErrorDescription string `json:"error_description"`
 }
 
+type tokenSuccessResponse struct {
+	AccessToken string `json:"access_token"`
+	IDToken     string `json:"id_token"`
+	TokenType   string `json:"token_type"`
+}
+
 func NormalizeProvider(provider string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	if provider == "" {
@@ -72,10 +118,10 @@ func issuerURL(cfg Config) string {
 	return baseURL + "/realms/" + url.PathEscape(realm)
 }
 
-func AuthenticateDeviceFlow(ctx context.Context, cfg Config, output io.Writer) error {
+func AuthenticateDeviceFlow(ctx context.Context, cfg Config, output io.Writer) (Identity, error) {
 	cfg.Provider = NormalizeProvider(cfg.Provider)
 	if !IsSupportedProvider(cfg.Provider) {
-		return fmt.Errorf("unsupported SSO provider %q", cfg.Provider)
+		return Identity{}, fmt.Errorf("unsupported SSO provider %q", cfg.Provider)
 	}
 	if strings.TrimSpace(cfg.BaseURL) == "" {
 		cfg.BaseURL = DefaultBaseURL
@@ -104,11 +150,11 @@ func AuthenticateDeviceFlow(ctx context.Context, cfg Config, output io.Writer) e
 
 	discovery, err := fetchDiscoveryDocument(ctx, cfg)
 	if err != nil {
-		return err
+		return Identity{}, err
 	}
 	deviceAuth, err := startDeviceAuthorization(ctx, cfg, discovery.DeviceAuthorizationEndpoint)
 	if err != nil {
-		return err
+		return Identity{}, err
 	}
 
 	if output != nil {
@@ -132,15 +178,16 @@ func AuthenticateDeviceFlow(ctx context.Context, cfg Config, output io.Writer) e
 			pollInterval = serverSuggested
 		}
 	}
-	if err := pollForToken(ctx, cfg, discovery.TokenEndpoint, deviceAuth.DeviceCode, pollInterval); err != nil {
-		return err
+	identity, err := pollForToken(ctx, cfg, discovery.TokenEndpoint, deviceAuth.DeviceCode, pollInterval)
+	if err != nil {
+		return Identity{}, err
 	}
 
 	if output != nil {
 		fmt.Fprintln(output, "SSO confirmation successful. Continuing SSH session...")
 		fmt.Fprintln(output)
 	}
-	return nil
+	return identity, nil
 }
 
 func httpClient(cfg Config) *http.Client {
@@ -220,12 +267,12 @@ func startDeviceAuthorization(ctx context.Context, cfg Config, endpoint string) 
 	return &deviceAuth, nil
 }
 
-func pollForToken(ctx context.Context, cfg Config, tokenEndpoint, deviceCode string, pollInterval time.Duration) error {
+func pollForToken(ctx context.Context, cfg Config, tokenEndpoint, deviceCode string, pollInterval time.Duration) (Identity, error) {
 	wait := pollInterval
 	for {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("SSO confirmation timed out after %s", cfg.AuthTimeout.Round(time.Second))
+			return Identity{}, fmt.Errorf("SSO confirmation timed out after %s", cfg.AuthTimeout.Round(time.Second))
 		case <-time.After(wait):
 		}
 
@@ -239,7 +286,7 @@ func pollForToken(ctx context.Context, cfg Config, tokenEndpoint, deviceCode str
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(values.Encode()))
 		if err != nil {
-			return fmt.Errorf("failed to build SSO token polling request: %w", err)
+			return Identity{}, fmt.Errorf("failed to build SSO token polling request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		if strings.TrimSpace(cfg.ClientSecret) != "" {
@@ -248,12 +295,17 @@ func pollForToken(ctx context.Context, cfg Config, tokenEndpoint, deviceCode str
 
 		resp, err := httpClient(cfg).Do(req)
 		if err != nil {
-			return fmt.Errorf("failed to poll SSO token endpoint: %w", err)
+			return Identity{}, fmt.Errorf("failed to poll SSO token endpoint: %w", err)
 		}
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			var tokenResp tokenSuccessResponse
+			if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+				_ = resp.Body.Close()
+				return Identity{}, fmt.Errorf("failed to decode SSO token response: %w", err)
+			}
 			_ = resp.Body.Close()
-			return nil
+			return identityFromTokenResponse(tokenResp), nil
 		}
 
 		var tokenErr tokenErrorResponse
@@ -268,12 +320,62 @@ func pollForToken(ctx context.Context, cfg Config, tokenEndpoint, deviceCode str
 			wait = pollInterval + 5*time.Second
 			continue
 		case "expired_token":
-			return fmt.Errorf("SSO device code expired before confirmation completed")
+			return Identity{}, fmt.Errorf("SSO device code expired before confirmation completed")
 		default:
 			message := formatOAuthErrorMessage(tokenErr, resp.Status)
-			return fmt.Errorf("SSO confirmation failed: %s", message)
+			return Identity{}, fmt.Errorf("SSO confirmation failed: %s", message)
 		}
 	}
+}
+
+func identityFromTokenResponse(tokenResp tokenSuccessResponse) Identity {
+	if identity := extractIdentityFromJWT(tokenResp.IDToken); identity.BestIdentifier() != "" {
+		return identity
+	}
+	return extractIdentityFromJWT(tokenResp.AccessToken)
+}
+
+func extractIdentityFromJWT(token string) Identity {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return Identity{}
+	}
+
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return Identity{}
+	}
+
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return Identity{}
+	}
+
+	var claims map[string]interface{}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return Identity{}
+	}
+
+	return Identity{
+		Subject:           firstStringClaim(claims, "sub"),
+		PreferredUsername: firstStringClaim(claims, "preferred_username", "username", "upn"),
+		Email:             firstStringClaim(claims, "email"),
+	}
+}
+
+func firstStringClaim(claims map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		value, ok := claims[key]
+		if !ok {
+			continue
+		}
+		if text, ok := value.(string); ok {
+			if trimmed := strings.TrimSpace(text); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
 }
 
 func formatOAuthErrorMessage(tokenErr tokenErrorResponse, fallback string) string {

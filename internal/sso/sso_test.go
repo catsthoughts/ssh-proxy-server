@@ -2,6 +2,7 @@ package sso
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -64,7 +65,7 @@ func TestPollForTokenUsesConfiguredConnectTimeout(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err := pollForToken(context.Background(), Config{
+	_, err := pollForToken(context.Background(), Config{
 		ClientID:       "ssh-proxy-server",
 		AuthTimeout:    2 * time.Second,
 		RequestTimeout: 50 * time.Millisecond,
@@ -74,5 +75,20 @@ func TestPollForTokenUsesConfiguredConnectTimeout(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "failed to poll SSO token endpoint") {
 		t.Fatalf("expected timeout-related polling error, got %q", err.Error())
+	}
+}
+
+func TestIdentityFromTokenResponseExtractsPreferredUsername(t *testing.T) {
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"user-123","preferred_username":"alice","email":"alice@example.com"}`))
+	identity := identityFromTokenResponse(tokenSuccessResponse{IDToken: "header." + payload + ".sig"})
+
+	if identity.PreferredUsername != "alice" {
+		t.Fatalf("PreferredUsername = %q, want %q", identity.PreferredUsername, "alice")
+	}
+	if identity.Email != "alice@example.com" {
+		t.Fatalf("Email = %q, want %q", identity.Email, "alice@example.com")
+	}
+	if !identity.MatchesSSHUser("alice") {
+		t.Fatal("expected identity to match SSH user alice")
 	}
 }

@@ -64,6 +64,7 @@ The config file currently supports:
   - `auth_timeout_seconds` — maximum time to wait for browser approval
   - `poll_interval_seconds` — polling interval for approval checks
   - `connect_timeout_seconds` — per-request HTTP timeout for Keycloak discovery/device/poll calls
+  - `enforce_ssh_user_match` — defaults to `true`; bind the approved Keycloak identity to the SSH username and allow opting out when set to `false`
   - `scope` — defaults to `openid`; profile/email claims are not required by the proxy
   - based on Keycloak device authorization flow: <https://www.keycloak.org/> and <https://www.keycloak.org/documentation>
 

@@ -200,7 +200,8 @@ func TestLoadAppliesSSOSettings(t *testing.T) {
 			"client_secret": "top-secret",
 			"auth_timeout_seconds": 45,
 			"poll_interval_seconds": 3,
-			"connect_timeout_seconds": 9
+			"connect_timeout_seconds": 9,
+			"enforce_ssh_user_match": false
 		}
 	}`
 	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
@@ -232,6 +233,9 @@ func TestLoadAppliesSSOSettings(t *testing.T) {
 	}
 	if cfg.SSO.ConnectTimeoutSeconds != 9 {
 		t.Fatalf("SSO.ConnectTimeoutSeconds = %d, want %d", cfg.SSO.ConnectTimeoutSeconds, 9)
+	}
+	if cfg.SSO.EnforceSSHUserMatch {
+		t.Fatal("expected SSO.EnforceSSHUserMatch to be false from config")
 	}
 }
 

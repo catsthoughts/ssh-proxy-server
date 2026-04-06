@@ -187,7 +187,7 @@ func TestEnsureSSOAuthenticationShowsLinkAndMarksVerified(t *testing.T) {
 	original := runSSODeviceAuth
 	defer func() { runSSODeviceAuth = original }()
 
-	runSSODeviceAuth = func(ctx context.Context, cfg sso.Config, output io.Writer) error {
+	runSSODeviceAuth = func(ctx context.Context, cfg sso.Config, output io.Writer) (sso.Identity, error) {
 		if cfg.Realm != "ssh-proxy-server" {
 			t.Fatalf("cfg.Realm = %q, want %q", cfg.Realm, "ssh-proxy-server")
 		}
@@ -195,18 +195,20 @@ func TestEnsureSSOAuthenticationShowsLinkAndMarksVerified(t *testing.T) {
 			t.Fatalf("cfg.AuthTimeout = %s, want %s", cfg.AuthTimeout, 45*time.Second)
 		}
 		_, _ = io.WriteString(output, "Open browser: https://sso.example/verify\n")
-		return nil
+		return sso.Identity{PreferredUsername: "alice"}, nil
 	}
 
 	channel := &stubSSHChannel{}
 	state := &types.SessionState{
-		SSOEnabled:      true,
-		SSOProvider:     "keycloak",
-		SSOBaseURL:      "http://localhost:8080",
-		SSORealm:        "ssh-proxy-server",
-		SSOClientID:     "ssh-proxy-server-cli",
-		SSOAuthTimeout:  45 * time.Second,
-		SSOPollInterval: 3 * time.Second,
+		ClientUser:          "alice",
+		SSOEnabled:          true,
+		SSOProvider:         "keycloak",
+		SSOBaseURL:          "http://localhost:8080",
+		SSORealm:            "ssh-proxy-server",
+		SSOClientID:         "ssh-proxy-server-cli",
+		SSOAuthTimeout:      45 * time.Second,
+		SSOPollInterval:     3 * time.Second,
+		SSOEnforceUserMatch: true,
 	}
 
 	if err := ensureSSOAuthentication(channel, state); err != nil {
@@ -217,6 +219,62 @@ func TestEnsureSSOAuthenticationShowsLinkAndMarksVerified(t *testing.T) {
 	}
 	if got := channel.stdout.String(); !strings.Contains(got, "https://sso.example/verify") {
 		t.Fatalf("expected SSO verification link in channel output, got %q", got)
+	}
+}
+
+func TestEnsureSSOAuthenticationRejectsMismatchedIdentityWhenEnforced(t *testing.T) {
+	original := runSSODeviceAuth
+	defer func() { runSSODeviceAuth = original }()
+
+	runSSODeviceAuth = func(ctx context.Context, cfg sso.Config, output io.Writer) (sso.Identity, error) {
+		return sso.Identity{PreferredUsername: "bob"}, nil
+	}
+
+	channel := &stubSSHChannel{}
+	state := &types.SessionState{
+		ClientUser:          "alice",
+		SSOEnabled:          true,
+		SSOProvider:         "keycloak",
+		SSORealm:            "ssh-proxy-server",
+		SSOClientID:         "ssh-proxy-server-cli",
+		SSOEnforceUserMatch: true,
+	}
+
+	err := ensureSSOAuthentication(channel, state)
+	if err == nil {
+		t.Fatal("expected ensureSSOAuthentication() to reject mismatched SSO identity")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "does not match") {
+		t.Fatalf("expected mismatch error, got %q", err.Error())
+	}
+	if state.SSOVerified {
+		t.Fatal("expected SSOVerified to remain false after mismatch")
+	}
+}
+
+func TestEnsureSSOAuthenticationAllowsMismatchedIdentityWhenDisabled(t *testing.T) {
+	original := runSSODeviceAuth
+	defer func() { runSSODeviceAuth = original }()
+
+	runSSODeviceAuth = func(ctx context.Context, cfg sso.Config, output io.Writer) (sso.Identity, error) {
+		return sso.Identity{PreferredUsername: "bob"}, nil
+	}
+
+	channel := &stubSSHChannel{}
+	state := &types.SessionState{
+		ClientUser:          "alice",
+		SSOEnabled:          true,
+		SSOProvider:         "keycloak",
+		SSORealm:            "ssh-proxy-server",
+		SSOClientID:         "ssh-proxy-server-cli",
+		SSOEnforceUserMatch: false,
+	}
+
+	if err := ensureSSOAuthentication(channel, state); err != nil {
+		t.Fatalf("ensureSSOAuthentication() returned error with identity binding disabled: %v", err)
+	}
+	if !state.SSOVerified {
+		t.Fatal("expected SSOVerified to be true when identity binding is disabled")
 	}
 }
 

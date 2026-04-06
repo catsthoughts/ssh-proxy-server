@@ -66,6 +66,7 @@ type SessionState struct {
 	SSOAuthTimeout        time.Duration
 	SSOPollInterval       time.Duration
 	SSORequestTimeout     time.Duration
+	SSOEnforceUserMatch   bool
 	SSOVerified           bool
 	TargetHost            string
 	TargetPort            string

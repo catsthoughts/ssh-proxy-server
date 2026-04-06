@@ -34,6 +34,7 @@ type SSOConfig struct {
 	AuthTimeoutSeconds    int    `json:"auth_timeout_seconds"`
 	PollIntervalSeconds   int    `json:"poll_interval_seconds"`
 	ConnectTimeoutSeconds int    `json:"connect_timeout_seconds"`
+	EnforceSSHUserMatch   bool   `json:"enforce_ssh_user_match"`
 }
 
 // Config holds the startup configuration loaded from JSON.
@@ -82,6 +83,7 @@ func Default() Config {
 			AuthTimeoutSeconds:    sso.DefaultAuthTimeoutSeconds,
 			PollIntervalSeconds:   sso.DefaultPollIntervalSeconds,
 			ConnectTimeoutSeconds: sso.DefaultRequestTimeoutSeconds,
+			EnforceSSHUserMatch:   true,
 		},
 	}
 }

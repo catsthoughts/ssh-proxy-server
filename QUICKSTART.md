@@ -75,7 +75,7 @@ Useful links:
 - Keycloak project: <https://www.keycloak.org/>
 - Keycloak docs: <https://www.keycloak.org/documentation>
 
-When the SSH session starts, the proxy prints a verification link into the terminal and waits up to `sso.auth_timeout_seconds` for approval. It re-checks Keycloak every `sso.poll_interval_seconds`, and each request to Keycloak uses `sso.connect_timeout_seconds` as the HTTP timeout. If your Keycloak client is confidential, also set `sso.client_secret` in `config.json`.
+When the SSH session starts, the proxy prints a verification link into the terminal and waits up to `sso.auth_timeout_seconds` for approval. It re-checks Keycloak every `sso.poll_interval_seconds`, and each request to Keycloak uses `sso.connect_timeout_seconds` as the HTTP timeout. By default the confirmed Keycloak user must also match the SSH username; set `sso.enforce_ssh_user_match` to `false` if you need to disable that check. If your Keycloak client is confidential, also set `sso.client_secret` in `config.json`.
 
 ### Optional: use static routing with failover / round-robin
 

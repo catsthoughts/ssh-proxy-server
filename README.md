@@ -116,6 +116,7 @@ Key JSON settings:
 - `sso.auth_timeout_seconds` — how long to wait for approval in the browser before rejecting the SSH session
 - `sso.poll_interval_seconds` — how often the proxy re-checks Keycloak for approval status
 - `sso.connect_timeout_seconds` — per-request timeout for discovery, device authorization, and polling calls to Keycloak
+- `sso.enforce_ssh_user_match` — defaults to `true`; require the confirmed Keycloak identity to match the SSH username, set to `false` to disable this check
 
 You can store recordings in a custom directory by setting `"recordings_dir": "/path/to/recordings"` in the JSON config.
 
@@ -183,12 +184,13 @@ Useful links:
     "client_secret": "",
     "auth_timeout_seconds": 120,
     "poll_interval_seconds": 5,
-    "connect_timeout_seconds": 10
+    "connect_timeout_seconds": 10,
+    "enforce_ssh_user_match": true
   }
 }
 ```
 
-When the SSH client opens a shell or direct command session, the proxy prints a verification link to the SSH console and waits up to `auth_timeout_seconds` for confirmation. The proxy re-checks approval every `poll_interval_seconds`, and each HTTP call to Keycloak is capped by `connect_timeout_seconds`. If the user does not approve the login in time, the SSH session is rejected.
+When the SSH client opens a shell or direct command session, the proxy prints a verification link to the SSH console and waits up to `auth_timeout_seconds` for confirmation. The proxy re-checks approval every `poll_interval_seconds`, and each HTTP call to Keycloak is capped by `connect_timeout_seconds`. By default it also verifies that the confirmed Keycloak identity matches the SSH username; set `enforce_ssh_user_match` to `false` only if you intentionally want to disable that binding. If the user does not approve the login in time, the SSH session is rejected.
 
 ### Optional: enable direct command execution
 
