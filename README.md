@@ -88,7 +88,8 @@ Example `config.json`:
     "scope": "openid",
     "auth_timeout_seconds": 120,
     "poll_interval_seconds": 5,
-    "connect_timeout_seconds": 10
+    "connect_timeout_seconds": 10,
+    "enforce_ssh_user_match": true
   }
 }
 ```
