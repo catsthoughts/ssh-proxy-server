@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"time"
 
 	"ssh-proxy-server/internal/appconfig"
 	"ssh-proxy-server/internal/hostkey"
@@ -45,6 +46,20 @@ func main() {
 	}
 
 	types.LogInfo("Recording format: %s", cfg.RecordingFormat)
+	types.LogInfo("Target connection settings: retries=%d timeout=%ds", cfg.Retries, cfg.ConnectTimeoutSeconds)
+	if cfg.StaticRouting.Enabled {
+		types.LogInfo("Static routing enabled: mode=%s targets=%d (LC_SSH_SERVER will be ignored)", cfg.StaticRouting.Mode, len(cfg.StaticRouting.Servers))
+	} else {
+		types.LogInfo("Dynamic routing enabled: target is expected from LC_SSH_SERVER")
+	}
+
+	routingConfig := server.RoutingConfig{
+		StaticEnabled:  cfg.StaticRouting.Enabled,
+		StaticTargets:  append([]string(nil), cfg.StaticRouting.Servers...),
+		Mode:           cfg.StaticRouting.Mode,
+		ConnectTimeout: time.Duration(cfg.ConnectTimeoutSeconds) * time.Second,
+		Retries:        cfg.Retries,
+	}
 
 	hostKey, err := hostkey.LoadOrGenerateHostKey(cfg.Key)
 	if err != nil {
@@ -66,6 +81,6 @@ func main() {
 			continue
 		}
 
-		go server.HandleConnection(conn, hostKey, cfg.RecordingsDir, cfg.AuthorizedKeys, cfg.AutoAcceptClientKeys, cfg.AllowDirectCommands, cfg.InsecureIgnoreHostKey, cfg.RecordingFormat)
+		go server.HandleConnection(conn, hostKey, cfg.RecordingsDir, cfg.AuthorizedKeys, cfg.AutoAcceptClientKeys, cfg.AllowDirectCommands, cfg.InsecureIgnoreHostKey, cfg.RecordingFormat, routingConfig)
 	}
 }

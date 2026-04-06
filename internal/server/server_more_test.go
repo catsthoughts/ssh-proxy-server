@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"io"
 	"log"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -56,17 +57,17 @@ func TestParseWindowChangeShortPayloadKeepsValues(t *testing.T) {
 }
 
 func TestHandleEnvRequestStoresTargetDetails(t *testing.T) {
-	state := &types.SessionState{EnvVars: make(map[string]string)}
+	state := &types.SessionState{ClientUser: "alice", EnvVars: make(map[string]string)}
 	req := &ssh.Request{
 		Type:      "env",
 		WantReply: false,
-		Payload:   encodeEnvPayload("LC_SSH_SERVER", "alice@example.com:2222"),
+		Payload:   encodeEnvPayload("LC_SSH_SERVER", "example.com:2222"),
 	}
 
 	handleEnvRequest(req, state)
 
-	if got := state.EnvVars["LC_SSH_SERVER"]; got != "alice@example.com:2222" {
-		t.Fatalf("EnvVars[LC_SSH_SERVER] = %q, want %q", got, "alice@example.com:2222")
+	if got := state.EnvVars["LC_SSH_SERVER"]; got != "example.com:2222" {
+		t.Fatalf("EnvVars[LC_SSH_SERVER] = %q, want %q", got, "example.com:2222")
 	}
 	if state.TargetUser != "alice" || state.TargetHost != "example.com" || state.TargetPort != "2222" {
 		t.Fatalf("parsed target = (%q, %q, %q), want (%q, %q, %q)", state.TargetUser, state.TargetHost, state.TargetPort, "alice", "example.com", "2222")
@@ -134,6 +135,48 @@ func TestHandleExecProxyRejectsDirectCommands(t *testing.T) {
 	}
 	if !channel.closed || !channel.closeWriteCalled {
 		t.Fatalf("expected channel to be closed after rejecting exec request")
+	}
+}
+
+func TestResolveTargetCandidatesUsesStaticRoutingAndIgnoresEnv(t *testing.T) {
+	state := &types.SessionState{
+		StaticRoutingEnabled: true,
+		StaticTargets:        []string{"primary.example.com:22", "backup.example.com:22"},
+		StaticRoutingMode:    RoutingModeFailover,
+		EnvVars:              map[string]string{"LC_SSH_SERVER": "ignored.example.net:2222"},
+	}
+
+	got, err := resolveTargetCandidates(state, "ignored.example.net:2222", "ssh other.example.net")
+	if err != nil {
+		t.Fatalf("resolveTargetCandidates() returned error: %v", err)
+	}
+	if !reflect.DeepEqual(got, state.StaticTargets) {
+		t.Fatalf("resolveTargetCandidates() = %#v, want %#v", got, state.StaticTargets)
+	}
+}
+
+func TestResolveTargetAddressUsesSessionUserWhenMissingInRoute(t *testing.T) {
+	user, host, port, err := resolveTargetAddress("target.example.com:2200", "alice")
+	if err != nil {
+		t.Fatalf("resolveTargetAddress() returned error: %v", err)
+	}
+	if user != "alice" || host != "target.example.com" || port != "2200" {
+		t.Fatalf("resolveTargetAddress() = (%q, %q, %q), want (%q, %q, %q)", user, host, port, "alice", "target.example.com", "2200")
+	}
+}
+
+func TestOrderedStaticTargetsRoundRobinRotates(t *testing.T) {
+	staticRouteCounter = 0
+	targets := []string{"one.example.com:22", "two.example.com:22", "three.example.com:22"}
+
+	first := orderedStaticTargets(targets, RoutingModeRoundRobin)
+	second := orderedStaticTargets(targets, RoutingModeRoundRobin)
+
+	if !reflect.DeepEqual(first, []string{"one.example.com:22", "two.example.com:22", "three.example.com:22"}) {
+		t.Fatalf("first orderedStaticTargets() = %#v", first)
+	}
+	if !reflect.DeepEqual(second, []string{"two.example.com:22", "three.example.com:22", "one.example.com:22"}) {
+		t.Fatalf("second orderedStaticTargets() = %#v", second)
 	}
 }
 

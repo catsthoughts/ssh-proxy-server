@@ -1,9 +1,12 @@
 package types
 
 import (
-	"golang.org/x/crypto/ssh"
 	"log"
+	"time"
+
 	"ssh-proxy-server/internal/recording"
+
+	"golang.org/x/crypto/ssh"
 )
 
 var currentLogLevel int
@@ -48,6 +51,11 @@ type SessionState struct {
 	AllowDirectCommands   bool
 	InsecureIgnoreHostKey bool
 	RecordingFormat       string
+	StaticRoutingEnabled  bool
+	StaticTargets         []string
+	StaticRoutingMode     string
+	ConnectTimeout        time.Duration
+	ConnectRetries        int
 	TargetHost            string
 	TargetPort            string
 	TargetUser            string

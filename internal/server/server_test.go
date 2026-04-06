@@ -37,9 +37,11 @@ func TestSplitTargetAddress(t *testing.T) {
 			wantPort: "2200",
 		},
 		{
-			name:    "invalid format",
-			input:   "example.com:22",
-			wantErr: true,
+			name:     "host without explicit user",
+			input:    "example.com:22",
+			wantUser: "",
+			wantHost: "example.com",
+			wantPort: "22",
 		},
 		{
 			name:    "rejects suspicious shell metacharacters",

@@ -33,6 +33,10 @@ Available log levels:
 >
 > If you want plain-text transcript files instead of `.cast`, set `"recording_format": "script"`.
 >
+> If you want the proxy to choose from a fixed target list, enable `"static_routing": { "enabled": true, ... }` in `config.json`.
+>
+> The top-level `"retries"` and `"connect_timeout_seconds"` settings apply to both normal `LC_SSH_SERVER` routing and static routing.
+>
 > If the target host key changed and you are in a temporary development scenario, set `"insecure_ignore_hostkey": true`.
 
 ## 3. Connect through the proxy
@@ -40,7 +44,7 @@ Available log levels:
 In another terminal:
 
 ```bash
-LC_SSH_SERVER="user@target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost
+LC_SSH_SERVER="target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 your-user@localhost
 ```
 
 Replace:
@@ -56,8 +60,18 @@ If you want one-shot command execution, set `"allow_direct_commands": true` in `
 
 ```bash
 ./ssh-proxy-server -config ./config.json
-LC_SSH_SERVER="user@target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost 'hostname'
+LC_SSH_SERVER="target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 your-user@localhost 'hostname'
 ```
+
+### Optional: use static routing with failover / round-robin
+
+Set `"static_routing": { "enabled": true, ... }` in `config.json` to route through a fixed list of servers. In this mode, `LC_SSH_SERVER` is optional and ignored:
+
+```bash
+ssh -A -p 2222 localhost
+```
+
+The proxy will try the configured targets in order, honor the configured timeout, and retry / move to the next server when a target does not respond.
 
 ### Optional: ignore target host key mismatches for development
 
@@ -100,15 +114,15 @@ ssh-add ~/.ssh/id_rsa
 Make sure you connect exactly like this:
 
 ```bash
-LC_SSH_SERVER="user@target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost
+LC_SSH_SERVER="target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 your-user@localhost
 ```
 
 ## How it works
 
-1. You set `LC_SSH_SERVER=user@host:port`
-2. SSH sends it to the proxy via `SendEnv`
-3. The proxy parses `user`, `host`, and `port`
-4. The proxy authenticates to the target with your SSH agent
+1. You either set `LC_SSH_SERVER=host:port` or enable `static_routing` in `config.json`
+2. SSH connects to the proxy with agent forwarding as the desired remote user
+3. The proxy resolves the target dynamically or from the static server list
+4. The proxy authenticates to the target with your SSH agent using that SSH session user by default
 5. Input/output is recorded in the configured format (`asciinema` by default, or `script` if selected)
 
 ## More information

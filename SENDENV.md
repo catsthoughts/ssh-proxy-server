@@ -7,12 +7,14 @@ This document explains how to use `LC_SSH_SERVER` with SSH's `SendEnv` option to
 Use:
 
 ```text
-LC_SSH_SERVER=user@host:port
+LC_SSH_SERVER=host:port
 ```
 
 Examples:
-- `ubuntu@192.168.1.100:22`
-- `admin@example.internal:2222`
+- `target-host.example.com:22`
+- `example.internal:2222`
+
+The proxy will use the authenticated SSH session user for the final target login. Legacy `user@host[:port]` values are still accepted for compatibility.
 
 If `:port` is omitted, the proxy defaults to `22`.
 
@@ -27,13 +29,13 @@ If `:port` is omitted, the proxy defaults to `22`.
 ### 2. Connect through it
 
 ```bash
-LC_SSH_SERVER="user@target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost
+LC_SSH_SERVER="target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 your-user@localhost
 ```
 
 This does three things:
 1. defines `LC_SSH_SERVER` locally
 2. sends it to the proxy over SSH
-3. lets the proxy validate and parse `user`, `host`, and `port` and dial the target
+3. lets the proxy validate and parse `host` and `port`, then reuse the SSH session user for the target login
 
 ## Important note about authentication
 
@@ -62,7 +64,7 @@ Host my-proxy
 Then connect like this:
 
 ```bash
-LC_SSH_SERVER="user@target-host:22" ssh my-proxy
+LC_SSH_SERVER="target-host:22" ssh your-user@my-proxy
 ```
 
 ## What the proxy currently supports
@@ -81,7 +83,7 @@ LC_SSH_SERVER="user@target-host:22" ssh my-proxy
 Use the exact command form below:
 
 ```bash
-LC_SSH_SERVER="user@target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost
+LC_SSH_SERVER="target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 your-user@localhost
 ```
 
 ### `Permission denied` or no usable key

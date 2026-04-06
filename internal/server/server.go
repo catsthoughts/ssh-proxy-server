@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 	"unicode"
 
 	proxyclient "ssh-proxy-server/internal/client"
@@ -21,7 +23,49 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir, authorizedKeysPath string, autoAcceptClientKeys, allowDirectCommands, insecureIgnoreHostKey bool, recordingFormat string) {
+const (
+	RoutingModeFailover          = "failover"
+	RoutingModeRoundRobin        = "round_robin"
+	DefaultConnectTimeoutSeconds = 10
+)
+
+var staticRouteCounter uint64
+
+type RoutingConfig struct {
+	StaticEnabled  bool
+	StaticTargets  []string
+	Mode           string
+	ConnectTimeout time.Duration
+	Retries        int
+}
+
+func NormalizeRoutingMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", RoutingModeFailover:
+		return RoutingModeFailover
+	case RoutingModeRoundRobin, "roundrobin", "round-robin":
+		return RoutingModeRoundRobin
+	default:
+		return strings.ToLower(strings.TrimSpace(mode))
+	}
+}
+
+func IsSupportedRoutingMode(mode string) bool {
+	switch NormalizeRoutingMode(mode) {
+	case RoutingModeFailover, RoutingModeRoundRobin:
+		return true
+	default:
+		return false
+	}
+}
+
+func ValidateTargetAddress(target string) error {
+	_, _, _, err := splitTargetAddress(target)
+	return err
+}
+
+func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir, authorizedKeysPath string, autoAcceptClientKeys, allowDirectCommands, insecureIgnoreHostKey bool, recordingFormat string, routingConfig RoutingConfig) {
+
 	defer conn.Close()
 
 	var clientKey ssh.PublicKey
@@ -61,8 +105,19 @@ func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir, authoriz
 		AllowDirectCommands:   allowDirectCommands,
 		InsecureIgnoreHostKey: insecureIgnoreHostKey,
 		RecordingFormat:       recording.NormalizeFormat(recordingFormat),
+		StaticRoutingEnabled:  routingConfig.StaticEnabled,
+		StaticTargets:         append([]string(nil), routingConfig.StaticTargets...),
+		StaticRoutingMode:     NormalizeRoutingMode(routingConfig.Mode),
+		ConnectTimeout:        routingConfig.ConnectTimeout,
+		ConnectRetries:        routingConfig.Retries,
 		RecordingsDir:         recordingsDir,
 		EnvVars:               make(map[string]string),
+	}
+	if state.ConnectTimeout <= 0 {
+		state.ConnectTimeout = time.Duration(DefaultConnectTimeoutSeconds) * time.Second
+	}
+	if state.ConnectRetries < 0 {
+		state.ConnectRetries = 0
 	}
 
 	// Handle global requests (like env variables)
@@ -192,19 +247,7 @@ func handleChannel(channel ssh.Channel, requests <-chan *ssh.Request, state *typ
 }
 
 func handleShellProxy(channel ssh.Channel, state *types.SessionState) {
-	targetAddr := state.EnvVars["LC_SSH_SERVER"]
-	if targetAddr == "" {
-		targetAddr = formatTargetAddress(state.TargetUser, state.TargetHost, state.TargetPort)
-	}
-
-	if targetAddr == "" {
-		fmt.Fprintf(channel, "Error: LC_SSH_SERVER not provided\n")
-		channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Code uint32 }{1}))
-		closeClientSession(channel, state)
-		return
-	}
-
-	if err := proxySession(channel, state, targetAddr, ""); err != nil {
+	if err := proxySession(channel, state, "", ""); err != nil {
 		fmt.Fprintf(channel, "Error: %v\n", err)
 		channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Code uint32 }{1}))
 		closeClientSession(channel, state)
@@ -214,28 +257,13 @@ func handleShellProxy(channel ssh.Channel, state *types.SessionState) {
 func handleExecProxy(channel ssh.Channel, state *types.SessionState, command string) {
 	if !state.AllowDirectCommands {
 		types.LogInfo("Rejected direct command for client=%s: direct command execution is disabled", state.ClientUser)
-		fmt.Fprintf(channel, "Error: direct commands are disabled; restart the proxy with -allow-direct-commands to enable them\n")
+		fmt.Fprintf(channel, "Error: direct commands are disabled; set allow_direct_commands=true in the proxy config to enable them\n")
 		sendExitStatus(channel, 1)
 		closeClientSession(channel, state)
 		return
 	}
 
-	targetAddr := state.EnvVars["LC_SSH_SERVER"]
-	if targetAddr == "" {
-		targetAddr = formatTargetAddress(state.TargetUser, state.TargetHost, state.TargetPort)
-	}
-	if targetAddr == "" {
-		targetAddr = parseTargetFromCommand(command)
-	}
-
-	if targetAddr == "" {
-		fmt.Fprintf(channel, "Error: No target host specified\n")
-		sendExitStatus(channel, 1)
-		closeClientSession(channel, state)
-		return
-	}
-
-	if err := proxySession(channel, state, targetAddr, command); err != nil {
+	if err := proxySession(channel, state, "", command); err != nil {
 		fmt.Fprintf(channel, "Error: %v\n", err)
 		channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Code uint32 }{1}))
 		closeClientSession(channel, state)
@@ -267,7 +295,17 @@ func handleEnvRequest(req *ssh.Request, state *types.SessionState) {
 	varValue := string(payload[8+nameLen : 8+nameLen+valueLen])
 
 	if varName == "LC_SSH_SERVER" {
-		targetUser, targetHost, targetPort, err := splitTargetAddress(varValue)
+		if state != nil && state.StaticRoutingEnabled {
+			types.LogDebug("Ignoring LC_SSH_SERVER=%q because static routing is enabled", varValue)
+			req.Reply(true, nil)
+			return
+		}
+
+		sessionUser := ""
+		if state != nil {
+			sessionUser = state.ClientUser
+		}
+		targetUser, targetHost, targetPort, err := resolveTargetAddress(varValue, sessionUser)
 		if err != nil {
 			clientUser := "unknown"
 			if state != nil && state.ClientUser != "" {
@@ -294,13 +332,33 @@ func handleEnvRequest(req *ssh.Request, state *types.SessionState) {
 }
 
 func proxySession(channel ssh.Channel, state *types.SessionState, targetAddr, command string) error {
-	targetUser, targetHost, targetPort, err := splitTargetAddress(targetAddr)
+	targets, err := resolveTargetCandidates(state, targetAddr, command)
 	if err != nil {
 		return err
 	}
+
+	targetClient, targetUser, targetHost, targetPort, err := connectToFirstAvailableTarget(state, targets)
+	if err != nil {
+		return err
+	}
+	defer targetClient.Close()
+	state.TargetClient = targetClient
 	state.TargetUser = targetUser
 	state.TargetHost = targetHost
 	state.TargetPort = targetPort
+	defer func() {
+		state.TargetClient = nil
+	}()
+
+	targetSession, err := targetClient.NewSession()
+	if err != nil {
+		return fmt.Errorf("failed to create target session: %w", err)
+	}
+	state.TargetSession = targetSession
+	defer func() {
+		state.TargetSession = nil
+		targetSession.Close()
+	}()
 
 	recordingID := generateRecordingID()
 	recordingFormat := recording.NormalizeFormat(state.RecordingFormat)
@@ -322,25 +380,6 @@ func proxySession(channel ssh.Channel, state *types.SessionState, targetAddr, co
 		return fmt.Errorf("failed to create %s recorder: %w", recordingFormat, err)
 	}
 	defer state.Recorder.Close()
-
-	types.LogInfo("Connecting to target %s", formatTargetAddress(targetUser, targetHost, targetPort))
-
-	targetClient, err := proxyclient.ConnectToTarget(state, targetUser, targetHost, targetPort)
-	if err != nil {
-		return err
-	}
-	defer targetClient.Close()
-	state.TargetClient = targetClient
-
-	targetSession, err := targetClient.NewSession()
-	if err != nil {
-		return fmt.Errorf("failed to create target session: %w", err)
-	}
-	state.TargetSession = targetSession
-	defer func() {
-		state.TargetSession = nil
-		targetSession.Close()
-	}()
 
 	stdinPipe, err := targetSession.StdinPipe()
 	if err != nil {
@@ -394,9 +433,98 @@ func proxySession(channel ssh.Channel, state *types.SessionState, targetAddr, co
 	return finalizeRemoteSession(channel, state, targetSession.Wait())
 }
 
+func resolveTargetCandidates(state *types.SessionState, targetAddr, command string) ([]string, error) {
+	if state != nil && state.StaticRoutingEnabled {
+		if len(state.StaticTargets) == 0 {
+			return nil, fmt.Errorf("static routing is enabled but no servers are configured")
+		}
+		return orderedStaticTargets(state.StaticTargets, state.StaticRoutingMode), nil
+	}
+
+	resolved := strings.TrimSpace(targetAddr)
+	if resolved == "" && state != nil {
+		resolved = strings.TrimSpace(state.EnvVars["LC_SSH_SERVER"])
+	}
+	if resolved == "" && strings.TrimSpace(command) != "" {
+		resolved = parseTargetFromCommand(command)
+	}
+	if resolved == "" {
+		if strings.TrimSpace(command) != "" {
+			return nil, fmt.Errorf("no target host specified")
+		}
+		return nil, fmt.Errorf("LC_SSH_SERVER not provided")
+	}
+	if err := ValidateTargetAddress(resolved); err != nil {
+		return nil, err
+	}
+	return []string{resolved}, nil
+}
+
+func orderedStaticTargets(targets []string, mode string) []string {
+	ordered := append([]string(nil), targets...)
+	if len(ordered) <= 1 {
+		return ordered
+	}
+	if NormalizeRoutingMode(mode) != RoutingModeRoundRobin {
+		return ordered
+	}
+	start := int(atomic.AddUint64(&staticRouteCounter, 1)-1) % len(ordered)
+	return append(append([]string(nil), ordered[start:]...), ordered[:start]...)
+}
+
+func connectToFirstAvailableTarget(state *types.SessionState, targets []string) (*ssh.Client, string, string, string, error) {
+	if len(targets) == 0 {
+		return nil, "", "", "", fmt.Errorf("no targets configured")
+	}
+
+	rounds := 1
+	if state != nil && state.ConnectRetries > 0 {
+		rounds += state.ConnectRetries
+	}
+	totalAttempts := rounds * len(targets)
+	timeout := time.Duration(DefaultConnectTimeoutSeconds) * time.Second
+	if state != nil && state.ConnectTimeout > 0 {
+		timeout = state.ConnectTimeout
+	}
+
+	failures := make([]string, 0, totalAttempts)
+	attempt := 0
+	for round := 0; round < rounds; round++ {
+		for _, target := range targets {
+			attempt++
+			sessionUser := ""
+			if state != nil {
+				sessionUser = state.ClientUser
+			}
+			targetUser, targetHost, targetPort, err := resolveTargetAddress(target, sessionUser)
+			if err != nil {
+				failures = append(failures, fmt.Sprintf("%s: %v", target, err))
+				continue
+			}
+			if state != nil {
+				state.TargetUser = targetUser
+				state.TargetHost = targetHost
+				state.TargetPort = targetPort
+			}
+
+			formattedTarget := formatTargetAddress(targetUser, targetHost, targetPort)
+			types.LogInfo("Connecting to target %s (attempt %d/%d, timeout=%s)", formattedTarget, attempt, totalAttempts, timeout)
+			client, err := proxyclient.ConnectToTarget(state, targetUser, targetHost, targetPort)
+			if err == nil {
+				return client, targetUser, targetHost, targetPort, nil
+			}
+
+			types.LogInfo("Target connection failed: %s (attempt %d/%d): %v", formattedTarget, attempt, totalAttempts, err)
+			failures = append(failures, fmt.Sprintf("%s: %v", formattedTarget, err))
+		}
+	}
+
+	return nil, "", "", "", fmt.Errorf("failed to connect to any target after %d attempt(s): %s", totalAttempts, strings.Join(failures, "; "))
+}
+
 func splitTargetAddress(targetAddr string) (string, string, string, error) {
 	if strings.TrimSpace(targetAddr) == "" {
-		return "", "", "", fmt.Errorf("invalid target format (expected user@host[:port])")
+		return "", "", "", fmt.Errorf("invalid target format (expected host[:port] or user@host[:port])")
 	}
 	if strings.TrimSpace(targetAddr) != targetAddr {
 		return "", "", "", fmt.Errorf("target contains leading or trailing whitespace")
@@ -405,12 +533,17 @@ func splitTargetAddress(targetAddr string) (string, string, string, error) {
 		return "", "", "", fmt.Errorf("target contains potentially unsafe characters")
 	}
 
-	targetUser, hostPort, ok := strings.Cut(targetAddr, "@")
-	if !ok || targetUser == "" || hostPort == "" {
-		return "", "", "", fmt.Errorf("invalid target format (expected user@host[:port])")
-	}
-	if !isSafeTargetUser(targetUser) {
-		return "", "", "", fmt.Errorf("invalid target user")
+	targetUser := ""
+	hostPort := targetAddr
+	if parsedUser, parsedHostPort, ok := strings.Cut(targetAddr, "@"); ok {
+		if parsedUser == "" || parsedHostPort == "" {
+			return "", "", "", fmt.Errorf("invalid target format (expected host[:port] or user@host[:port])")
+		}
+		if !isSafeTargetUser(parsedUser) {
+			return "", "", "", fmt.Errorf("invalid target user")
+		}
+		targetUser = parsedUser
+		hostPort = parsedHostPort
 	}
 
 	host := hostPort
@@ -433,7 +566,7 @@ func splitTargetAddress(targetAddr string) (string, string, string, error) {
 	}
 
 	if host == "" {
-		return "", "", "", fmt.Errorf("invalid target format (expected user@host[:port])")
+		return "", "", "", fmt.Errorf("invalid target format (expected host[:port] or user@host[:port])")
 	}
 	if !isSafeTargetHost(host) {
 		return "", "", "", fmt.Errorf("invalid target host")
@@ -442,6 +575,21 @@ func splitTargetAddress(targetAddr string) (string, string, string, error) {
 		return "", "", "", fmt.Errorf("invalid target port")
 	}
 
+	return targetUser, host, port, nil
+}
+
+func resolveTargetAddress(targetAddr, sessionUser string) (string, string, string, error) {
+	targetUser, host, port, err := splitTargetAddress(targetAddr)
+	if err != nil {
+		return "", "", "", err
+	}
+	if targetUser == "" {
+		sessionUser = strings.TrimSpace(sessionUser)
+		if !isSafeTargetUser(sessionUser) {
+			return "", "", "", fmt.Errorf("invalid SSH session user")
+		}
+		targetUser = sessionUser
+	}
 	return targetUser, host, port, nil
 }
 
@@ -612,19 +760,22 @@ func (w inputRecorderWriter) Write(p []byte) (int, error) {
 }
 
 func parseTargetFromCommand(command string) string {
-	// Parse command like: ssh -l user target-host
-	// or: ssh user@target-host
-	// For simplicity, look for patterns
+	// Parse commands like: ssh -l user target-host, ssh user@target-host, or ssh target-host
 	parts := strings.Fields(command)
+	if len(parts) == 0 || parts[0] != "ssh" {
+		return ""
+	}
 	for i, part := range parts {
 		if (part == "-l" || part == "-u") && i+1 < len(parts) {
-			// Next part is username
 			if i+2 < len(parts) {
 				return parts[i+1] + "@" + parts[i+2]
 			}
-		} else if strings.Contains(part, "@") && !strings.HasPrefix(part, "-") {
-			return part
+			continue
 		}
+		if strings.HasPrefix(part, "-") || part == "ssh" {
+			continue
+		}
+		return part
 	}
 	return ""
 }

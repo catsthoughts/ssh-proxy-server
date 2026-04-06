@@ -2,7 +2,7 @@
 
 ## Overview
 
-SSH proxy server with dynamic target routing via `LC_SSH_SERVER`, SSH agent-based target authentication, session recording, clean shutdown handling, terminal resize forwarding, and config-driven startup via `-config`. Interactive terminal sessions are enabled by default; direct commands require `allow_direct_commands` in the JSON config.
+SSH proxy server with dynamic target routing via `LC_SSH_SERVER` or static routing through a fixed server list, SSH agent-based target authentication, session recording, clean shutdown handling, terminal resize forwarding, and config-driven startup via `-config`. Interactive terminal sessions are enabled by default; direct commands require `allow_direct_commands` in the JSON config.
 
 ## What Was Implemented
 
@@ -13,11 +13,12 @@ SSH proxy server with dynamic target routing via `LC_SSH_SERVER`, SSH agent-base
    - Handles SSH channel requests (`shell`, `pty-req`, `window-change`, and `exec` when `allow_direct_commands` is enabled in the JSON config)
    - **NEW: Handles SSH environment variables via `env` channel requests**
 
-2. **Dynamic Routing via SendEnv** ✅ NEW
-   - SSH client sends environment variables using `-o "SendEnv=VAR_NAME"`
-   - Proxy receives and parses environment variables from client
-   - Uses `LC_SSH_SERVER` for target host routing
-   - Priority-based selection: SendEnv > command
+2. **Dynamic and Static Routing** ✅ NEW
+   - SSH client can send `LC_SSH_SERVER` using `-o "SendEnv=LC_SSH_SERVER"`
+   - Proxy also supports a fixed `static_routing.servers` list in `config.json`
+   - Static mode supports `failover` and `round_robin`
+   - Global `connect_timeout_seconds` and retry rounds via `retries` for both dynamic and static routing
+   - When static routing is enabled, `LC_SSH_SERVER` becomes optional and is ignored
 
 3. **Session Recording** (`recording.go`)
    - Records sessions in `asciinema` v2 by default, or in plain `script` transcript format when selected
@@ -52,14 +53,14 @@ SSH proxy server with dynamic target routing via `LC_SSH_SERVER`, SSH agent-base
 ./ssh-proxy-server -config ./config.json
 
 # In another terminal, connect with target via SendEnv + agent forwarding
-LC_SSH_SERVER="user@target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost
+LC_SSH_SERVER="target-host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 your-user@localhost
 ```
 
 ### More Examples
 
 ```bash
 # One-liner connection
-LC_SSH_SERVER="admin@server:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost
+LC_SSH_SERVER="server:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 admin@localhost
 
 # Development-only startup if known_hosts mismatches must be ignored temporarily
 # Set "insecure_ignore_hostkey": true in config.json, then run:
@@ -74,14 +75,14 @@ Host my-proxy
     SendEnv LC_SSH_SERVER
 EOF
 
-LC_SSH_SERVER="user@target:22" ssh my-proxy
+LC_SSH_SERVER="target:22" ssh your-user@my-proxy
 ```
 
 ## Key Implementation Details
 
 ### SendEnv Flow
 
-1. **Client**: `LC_SSH_SERVER="user@host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" ...`
+1. **Client**: `LC_SSH_SERVER="host:22" ssh -A -o "SendEnv=LC_SSH_SERVER" ...`
 2. **SSH client**: Sends `LC_SSH_SERVER` to proxy during session setup
 3. **Proxy receives**: `handleEnvRequest()` in server.go parses the variable
 4. **Proxy stores**: In `SessionState.EnvVars`
@@ -180,7 +181,7 @@ cp ./config.example.json ./config.json
 ./ssh-proxy-server -config ./config.json
 
 # Terminal 2: Connect
-LC_SSH_SERVER="localhost@127.0.0.1:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 localhost
+LC_SSH_SERVER="target-host.example.com:22" ssh -A -o "SendEnv=LC_SSH_SERVER" -p 2222 your-user@localhost
 
 # Check recordings
 ls -la recordings/
