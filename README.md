@@ -87,7 +87,7 @@ Example `config.json`:
   "sso": {
     "enabled": false,
     "provider": "keycloak",
-    "base_url": "http://localhost:8080",
+    "base_url": "https://localhost:8443",
     "realm": "ssh-proxy-server",
     "client_id": "ssh-proxy-server",
     "client_secret": "",
@@ -95,7 +95,8 @@ Example `config.json`:
     "auth_timeout_seconds": 120,
     "poll_interval_seconds": 5,
     "connect_timeout_seconds": 10,
-    "enforce_ssh_user_match": true
+    "enforce_ssh_user_match": true,
+    "insecure_skip_verify": false
   }
 }
 ```
@@ -126,6 +127,7 @@ Key JSON settings:
 - `sso.poll_interval_seconds` — how often the proxy re-checks Keycloak for approval status
 - `sso.connect_timeout_seconds` — per-request timeout for discovery, device authorization, and polling calls to Keycloak
 - `sso.enforce_ssh_user_match` — defaults to `true`; require the confirmed Keycloak identity to match the SSH username, set to `false` to disable this check
+- `sso.insecure_skip_verify` — defaults to `false`; set to `true` to skip TLS certificate verification for self-signed certificates on the Keycloak server
 
 You can store recordings in a custom directory by setting `"recordings_dir": "/path/to/recordings"` in the JSON config.
 
@@ -218,19 +220,20 @@ Useful links:
   "sso": {
     "enabled": true,
     "provider": "keycloak",
-    "base_url": "http://localhost:8080",
+    "base_url": "https://localhost:8443",
     "realm": "ssh-proxy-server",
     "client_id": "ssh-proxy-server",
     "client_secret": "",
     "auth_timeout_seconds": 120,
     "poll_interval_seconds": 5,
     "connect_timeout_seconds": 10,
-    "enforce_ssh_user_match": true
+    "enforce_ssh_user_match": true,
+    "insecure_skip_verify": false
   }
 }
 ```
 
-When the SSH client opens a shell or direct command session, the proxy prints a verification link to the SSH console and waits up to `auth_timeout_seconds` for confirmation. The proxy re-checks approval every `poll_interval_seconds`, and each HTTP call to Keycloak is capped by `connect_timeout_seconds`. By default it also verifies that the confirmed Keycloak identity matches the SSH username; set `enforce_ssh_user_match` to `false` only if you intentionally want to disable that binding. If the user does not approve the login in time, the SSH session is rejected.
+When the SSH client opens a shell or direct command session, the proxy prints a verification link to the SSH console and waits up to `auth_timeout_seconds` for confirmation. The proxy re-checks approval every `poll_interval_seconds`, and each HTTP call to Keycloak is capped by `connect_timeout_seconds`. By default it also verifies that the confirmed Keycloak identity matches the SSH username; set `enforce_ssh_user_match` to `false` only if you intentionally want to disable that binding. Set `insecure_skip_verify` to `true` only when the Keycloak server uses a self-signed TLS certificate. If the user does not approve the login in time, the SSH session is rejected.
 
 ### Optional: enable direct command execution
 
@@ -345,22 +348,30 @@ cmd/
 └── ssh-proxy-server/
     └── main.go              # Entry point and server initialization
 internal/
+├── appconfig/
+│   └── config.go            # JSON config loading, defaults, validation
 ├── client/
-│   └── client.go            # Target host connection logic
+│   └── client.go            # Target host connection and agent forwarding
 ├── hostkey/
 │   └── hostkey.go           # Host key generation and loading
+├── metrics/
+│   └── metrics.go           # Prometheus metrics collector and HTTP handler
 ├── recording/
-│   └── recording.go         # Asciinema v2 format recording
+│   └── recording.go         # Asciinema v2 and script format recording
 ├── server/
-│   └── server.go            # SSH server connection and channel handling
+│   ├── security.go          # Client key authorization (authorized_keys)
+│   └── server.go            # SSH server, channel handling, target routing
+├── sso/
+│   └── sso.go               # OAuth2 device flow (Keycloak SSO/2FA)
 └── types/
-    └── types.go             # Shared type definitions
+    └── types.go             # SessionState, logging, shared types
 ```
 
 ## Dependencies
 
 - `golang.org/x/crypto/ssh` - SSH protocol implementation and agent/known_hosts support
 - `github.com/google/uuid` - Session and recording ID generation
+- `github.com/prometheus/client_golang` - Prometheus metrics export
 
 ## Documentation
 
