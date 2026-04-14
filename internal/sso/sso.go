@@ -2,6 +2,7 @@ package sso
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -24,17 +25,18 @@ const (
 )
 
 type Config struct {
-	Enabled          bool
-	Provider         string
-	BaseURL          string
-	Realm            string
-	ClientID         string
-	ClientSecret     string
-	Scope            string
-	AuthTimeout      time.Duration
-	PollInterval     time.Duration
-	RequestTimeout   time.Duration
-	EnforceUserMatch bool
+	Enabled            bool
+	Provider           string
+	BaseURL            string
+	Realm              string
+	ClientID           string
+	ClientSecret       string
+	Scope              string
+	AuthTimeout        time.Duration
+	PollInterval       time.Duration
+	RequestTimeout     time.Duration
+	EnforceUserMatch   bool
+	InsecureSkipVerify bool
 }
 
 // Identity represents the user identity returned by the SSO provider.
@@ -195,7 +197,13 @@ func httpClient(cfg Config) *http.Client {
 	if cfg.RequestTimeout > 0 {
 		timeout = cfg.RequestTimeout
 	}
-	return &http.Client{Timeout: timeout}
+	client := &http.Client{Timeout: timeout}
+	if cfg.InsecureSkipVerify {
+		client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // user-configured for self-signed certs
+		}
+	}
+	return client
 }
 
 func fetchDiscoveryDocument(ctx context.Context, cfg Config) (*discoveryDocument, error) {

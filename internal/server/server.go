@@ -44,17 +44,18 @@ type RoutingConfig struct {
 }
 
 type SSOConfig struct {
-	Enabled          bool
-	Provider         string
-	BaseURL          string
-	Realm            string
-	ClientID         string
-	ClientSecret     string
-	Scope            string
-	AuthTimeout      time.Duration
-	PollInterval     time.Duration
-	RequestTimeout   time.Duration
-	EnforceUserMatch bool
+	Enabled            bool
+	Provider           string
+	BaseURL            string
+	Realm              string
+	ClientID           string
+	ClientSecret       string
+	Scope              string
+	AuthTimeout        time.Duration
+	PollInterval       time.Duration
+	RequestTimeout     time.Duration
+	EnforceUserMatch   bool
+	InsecureSkipVerify bool
 }
 
 func NormalizeRoutingMode(mode string) string {
@@ -142,6 +143,7 @@ func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir, authoriz
 		SSOPollInterval:       ssoConfig.PollInterval,
 		SSORequestTimeout:     ssoConfig.RequestTimeout,
 		SSOEnforceUserMatch:   ssoConfig.EnforceUserMatch,
+		SSOInsecureSkipVerify: ssoConfig.InsecureSkipVerify,
 		RecordingsDir:         recordingsDir,
 		EnvVars:               make(map[string]string),
 	}
@@ -363,16 +365,17 @@ func ensureSSOAuthentication(channel ssh.Channel, state *types.SessionState) err
 	defer metrics.SSOWaitingFinished()
 
 	cfg := sso.Config{
-		Enabled:        state.SSOEnabled,
-		Provider:       state.SSOProvider,
-		BaseURL:        state.SSOBaseURL,
-		Realm:          state.SSORealm,
-		ClientID:       state.SSOClientID,
-		ClientSecret:   state.SSOClientSecret,
-		Scope:          state.SSOScope,
-		AuthTimeout:    state.SSOAuthTimeout,
-		PollInterval:   state.SSOPollInterval,
-		RequestTimeout: state.SSORequestTimeout,
+		Enabled:            state.SSOEnabled,
+		Provider:           state.SSOProvider,
+		BaseURL:            state.SSOBaseURL,
+		Realm:              state.SSORealm,
+		ClientID:           state.SSOClientID,
+		ClientSecret:       state.SSOClientSecret,
+		Scope:              state.SSOScope,
+		AuthTimeout:        state.SSOAuthTimeout,
+		PollInterval:       state.SSOPollInterval,
+		RequestTimeout:     state.SSORequestTimeout,
+		InsecureSkipVerify: state.SSOInsecureSkipVerify,
 	}
 	identity, err := runSSODeviceAuth(context.Background(), cfg, channel)
 	if err != nil {

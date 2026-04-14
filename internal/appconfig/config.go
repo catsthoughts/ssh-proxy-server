@@ -41,6 +41,7 @@ type SSOConfig struct {
 	PollIntervalSeconds   int    `json:"poll_interval_seconds"`
 	ConnectTimeoutSeconds int    `json:"connect_timeout_seconds"`
 	EnforceSSHUserMatch   bool   `json:"enforce_ssh_user_match"`
+	InsecureSkipVerify    bool   `json:"insecure_skip_verify"`
 }
 
 // Config holds the startup configuration loaded from JSON.

@@ -83,7 +83,8 @@ func main() {
 		AuthTimeout:      time.Duration(cfg.SSO.AuthTimeoutSeconds) * time.Second,
 		PollInterval:     time.Duration(cfg.SSO.PollIntervalSeconds) * time.Second,
 		RequestTimeout:   time.Duration(cfg.SSO.ConnectTimeoutSeconds) * time.Second,
-		EnforceUserMatch: cfg.SSO.EnforceSSHUserMatch,
+		EnforceUserMatch:   cfg.SSO.EnforceSSHUserMatch,
+		InsecureSkipVerify: cfg.SSO.InsecureSkipVerify,
 	}
 
 	hostKey, err := hostkey.LoadOrGenerateHostKey(cfg.Key)
