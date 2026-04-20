@@ -24,6 +24,7 @@ import (
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
 
 const (
@@ -83,21 +84,19 @@ func ValidateTargetAddress(target string) error {
 	return err
 }
 
-func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir, authorizedKeysPath string, autoAcceptClientKeys, allowDirectCommands, insecureIgnoreHostKey bool, recordingFormat string, routingConfig RoutingConfig, ssoConfig SSOConfig) {
+func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir, authorizedKeysPath string, autoAcceptClientKeys, allowDirectCommands, insecureIgnoreHostKey bool, recordingFormat string, routingConfig RoutingConfig, ssoConfig SSOConfig, trustedCACerts, trustedHostCACerts []ssh.PublicKey) {
 
 	defer conn.Close()
 
 	var clientKey ssh.PublicKey
 
-	// Setup SSH server config
 	config := &ssh.ServerConfig{
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			if err := isAuthorizedClientKey(key, authorizedKeysPath, autoAcceptClientKeys); err != nil {
+			if err := isAuthorizedClientKeyWithCA(key, authorizedKeysPath, trustedCACerts, autoAcceptClientKeys); err != nil {
 				types.LogInfo("Rejected public key for %s from %s: %v", conn.User(), conn.RemoteAddr(), err)
 				return nil, err
 			}
 
-			// Store the key for forwarding to target host
 			clientKey = key
 			types.LogDebug("Accepted auth for %s with key %s (%s)", conn.User(), key.Type(), ssh.FingerprintSHA256(key))
 			return &ssh.Permissions{}, nil
@@ -146,6 +145,7 @@ func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir, authoriz
 		SSOInsecureSkipVerify: ssoConfig.InsecureSkipVerify,
 		RecordingsDir:         recordingsDir,
 		EnvVars:               make(map[string]string),
+		TrustedHostCASerts:    trustedHostCACerts,
 	}
 	if state.ConnectTimeout <= 0 {
 		state.ConnectTimeout = time.Duration(DefaultConnectTimeoutSeconds) * time.Second
@@ -180,6 +180,20 @@ func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir, authoriz
 
 	// Handle channels
 	for newChannel := range chans {
+		if newChannel.ChannelType() == "auth-agent@openssh.com" {
+			state.SetAgentRequested(true)
+			types.LogDebug("SSH agent forwarding channel requested by client")
+			channel, agentRequests, err := newChannel.Accept()
+			if err != nil {
+				log.Printf("Failed to accept agent channel: %v", err)
+				continue
+			}
+			go ssh.DiscardRequests(agentRequests)
+			agentClient := agent.NewClient(channel)
+			state.SetAgentClient(agentClient)
+			continue
+		}
+
 		if newChannel.ChannelType() != "session" {
 			newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
 			continue
@@ -200,6 +214,10 @@ func handleGlobalRequests(requests <-chan *ssh.Request, state *types.SessionStat
 		switch req.Type {
 		case "env":
 			handleEnvRequest(req, state)
+		case "auth-agent-req@openssh.com":
+			state.SetAgentRequested(true)
+			types.LogDebug("SSH agent forwarding requested by client")
+			req.Reply(true, nil)
 		default:
 			if req.WantReply {
 				req.Reply(false, nil)
@@ -302,7 +320,7 @@ func handleChannel(channel ssh.Channel, requests <-chan *ssh.Request, state *typ
 func handleShellProxy(channel ssh.Channel, state *types.SessionState) {
 	if err := ensureSSOAuthentication(channel, state); err != nil {
 		appmetrics.Default().RecordProxySession("failure")
-		types.LogInfo("Session rejected during SSO confirmation: client=%s err=%v", state.ClientUser, err)
+		types.LogInfo("Session rejected during SSO confirmation: client=%s err=%v", state.ClientUserValue(), err)
 		fmt.Fprintf(channel, "Error: %v\n", err)
 		sendExitStatus(channel, 1)
 		closeClientSession(channel, state)
@@ -310,7 +328,7 @@ func handleShellProxy(channel ssh.Channel, state *types.SessionState) {
 	}
 	if err := proxySession(channel, state, "", ""); err != nil {
 		appmetrics.Default().RecordProxySession("failure")
-		types.LogInfo("Shell proxy failed: client=%s err=%v", state.ClientUser, err)
+		types.LogInfo("Shell proxy failed: client=%s err=%v", state.ClientUserValue(), err)
 		fmt.Fprintf(channel, "Error: %v\n", err)
 		channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Code uint32 }{1}))
 		closeClientSession(channel, state)
@@ -322,7 +340,7 @@ func handleShellProxy(channel ssh.Channel, state *types.SessionState) {
 func handleExecProxy(channel ssh.Channel, state *types.SessionState, command string) {
 	if !state.AllowDirectCommands {
 		appmetrics.Default().RecordProxySession("rejected")
-		types.LogInfo("Rejected direct command for client=%s: direct command execution is disabled", state.ClientUser)
+		types.LogInfo("Rejected direct command for client=%s: direct command execution is disabled", state.ClientUserValue())
 		fmt.Fprintf(channel, "Error: direct commands are disabled; set allow_direct_commands=true in the proxy config to enable them\n")
 		sendExitStatus(channel, 1)
 		closeClientSession(channel, state)
@@ -331,7 +349,7 @@ func handleExecProxy(channel ssh.Channel, state *types.SessionState, command str
 
 	if err := ensureSSOAuthentication(channel, state); err != nil {
 		appmetrics.Default().RecordProxySession("failure")
-		types.LogInfo("Direct command rejected during SSO confirmation: client=%s err=%v", state.ClientUser, err)
+		types.LogInfo("Direct command rejected during SSO confirmation: client=%s err=%v", state.ClientUserValue(), err)
 		fmt.Fprintf(channel, "Error: %v\n", err)
 		sendExitStatus(channel, 1)
 		closeClientSession(channel, state)
@@ -340,7 +358,7 @@ func handleExecProxy(channel ssh.Channel, state *types.SessionState, command str
 
 	if err := proxySession(channel, state, "", command); err != nil {
 		appmetrics.Default().RecordProxySession("failure")
-		types.LogInfo("Direct command proxy failed: client=%s err=%v", state.ClientUser, err)
+		types.LogInfo("Direct command proxy failed: client=%s err=%v", state.ClientUserValue(), err)
 		fmt.Fprintf(channel, "Error: %v\n", err)
 		channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Code uint32 }{1}))
 		closeClientSession(channel, state)
@@ -355,8 +373,8 @@ func ensureSSOAuthentication(channel ssh.Channel, state *types.SessionState) err
 	}
 
 	clientUser := "unknown"
-	if strings.TrimSpace(state.ClientUser) != "" {
-		clientUser = state.ClientUser
+	if strings.TrimSpace(state.ClientUserValue()) != "" {
+		clientUser = state.ClientUserValue()
 	}
 	types.LogInfo("Starting SSO confirmation: client=%s provider=%s realm=%s timeout=%s poll_interval=%s connect_timeout=%s", clientUser, state.SSOProvider, state.SSORealm, state.SSOAuthTimeout.Round(time.Second), state.SSOPollInterval.Round(time.Second), state.SSORequestTimeout.Round(time.Second))
 
@@ -435,13 +453,13 @@ func handleEnvRequest(req *ssh.Request, state *types.SessionState) {
 
 		sessionUser := ""
 		if state != nil {
-			sessionUser = state.ClientUser
+			sessionUser = state.ClientUserValue()
 		}
 		targetUser, targetHost, targetPort, err := resolveTargetAddress(varValue, sessionUser)
 		if err != nil {
 			clientUser := "unknown"
-			if state != nil && state.ClientUser != "" {
-				clientUser = state.ClientUser
+			if state != nil && state.ClientUserValue() != "" {
+				clientUser = state.ClientUserValue()
 			}
 			types.LogInfo("Rejected suspicious LC_SSH_SERVER value for client=%s: %q (%v)", clientUser, varValue, err)
 			req.Reply(false, nil)
@@ -549,7 +567,7 @@ func proxySession(channel ssh.Channel, state *types.SessionState, targetAddr, co
 	go copySessionOutput(channel, stdoutPipe, state, "stdout")
 	go copySessionOutput(channel.Stderr(), stderrPipe, state, "stderr")
 
-	types.LogInfo("Proxy session started: client=%s target=%s", state.ClientUser, formatTargetAddress(targetUser, targetHost, targetPort))
+	types.LogInfo("Proxy session started: client=%s target=%s", state.ClientUserValue(), formatTargetAddress(targetUser, targetHost, targetPort))
 
 	if command == "" {
 		if err := targetSession.Shell(); err != nil {
@@ -625,7 +643,7 @@ func connectToFirstAvailableTarget(state *types.SessionState, targets []string) 
 			attempt++
 			sessionUser := ""
 			if state != nil {
-				sessionUser = state.ClientUser
+				sessionUser = state.ClientUserValue()
 			}
 			targetUser, targetHost, targetPort, err := resolveTargetAddress(target, sessionUser)
 			if err != nil {
@@ -809,7 +827,7 @@ func finalizeRemoteSession(channel ssh.Channel, state *types.SessionState, err e
 	target := formatTargetAddress(targetUser, targetHost, targetPort)
 
 	if err == nil {
-		types.LogInfo("Session ended: client=%s target=%s exit_status=0", state.ClientUser, target)
+		types.LogInfo("Session ended: client=%s target=%s exit_status=0", state.ClientUserValue(), target)
 		sendExitStatus(channel, 0)
 		closeClientSession(channel, state)
 		return nil
@@ -818,13 +836,13 @@ func finalizeRemoteSession(channel ssh.Channel, state *types.SessionState, err e
 	var exitErr *ssh.ExitError
 	if errors.As(err, &exitErr) {
 		status := uint32(exitErr.ExitStatus())
-		types.LogInfo("Session ended: client=%s target=%s exit_status=%d", state.ClientUser, target, status)
+		types.LogInfo("Session ended: client=%s target=%s exit_status=%d", state.ClientUserValue(), target, status)
 		sendExitStatus(channel, status)
 		closeClientSession(channel, state)
 		return nil
 	}
 
-	types.LogInfo("Session ended with error: client=%s target=%s err=%v", state.ClientUser, target, err)
+	types.LogInfo("Session ended with error: client=%s target=%s err=%v", state.ClientUserValue(), target, err)
 	sendExitStatus(channel, 1)
 	closeClientSession(channel, state)
 	return err
@@ -837,9 +855,6 @@ func sendExitStatus(channel ssh.Channel, code uint32) {
 func closeClientSession(channel ssh.Channel, state *types.SessionState) {
 	_ = channel.CloseWrite()
 	_ = channel.Close()
-	if state != nil && state.ClientConn != nil {
-		_ = state.ClientConn.Close()
-	}
 }
 
 func copySessionInput(src io.Reader, dst io.WriteCloser, state *types.SessionState) {
@@ -851,7 +866,7 @@ func copySessionInput(src io.Reader, dst io.WriteCloser, state *types.SessionSta
 	target := formatTargetAddress(targetUser, targetHost, targetPort)
 
 	if err == nil || errors.Is(err, io.EOF) {
-		types.LogInfo("User input closed: client=%s target=%s", state.ClientUser, target)
+		types.LogInfo("User input closed: client=%s target=%s", state.ClientUserValue(), target)
 		return
 	}
 

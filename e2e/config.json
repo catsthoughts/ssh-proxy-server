@@ -1,0 +1,20 @@
+{
+  "listen": "0.0.0.0:2222",
+  "key": "/ssh_host_key",
+  "log_level": "debug",
+  "recordings_dir": "/recordings",
+  "authorized_keys": "/data/combined_authorized_keys",
+  "auto_accept_client_keys": false,
+  "allow_direct_commands": true,
+  "insecure_ignore_hostkey": true,
+  "recording_format": "asciinema",
+  "retries": 1,
+  "connect_timeout_seconds": 10,
+  "trusted_ca_certs": ["/data/trusted_user_ca.pub", "/data/trusted_ecdsa_user_ca.pub"],
+  "trusted_host_ca_certs": [],
+  "static_routing": {
+    "enabled": true,
+    "servers": ["testuser@target-host:22"],
+    "mode": "failover"
+  }
+}

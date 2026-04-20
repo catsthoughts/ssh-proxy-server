@@ -35,3 +35,12 @@ coverage.out
 /ssh_host_key.pub
 /test_key
 /test_key.pub
+
+# E2E test sensitive files and directories
+e2e/e2e-keys/
+e2e/recordings/
+e2e/test-results/
+e2e/ssh_host_key
+e2e/ssh_host_key.pub
+e2e/test_binary
+e2e/*.test

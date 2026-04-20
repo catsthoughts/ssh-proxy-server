@@ -1,7 +1,6 @@
 package client
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"net"
@@ -63,29 +62,15 @@ func ConnectToTarget(state *types.SessionState, targetUser, targetHost, targetPo
 }
 
 func authMethodForClient(state *types.SessionState) (ssh.AuthMethod, error) {
-	agentClient, err := GetSSHAgentConn(state)
+	signers := []ssh.Signer{}
+
+	signer, err := GetAgentSigner(state)
 	if err != nil {
 		return nil, err
 	}
+	signers = append(signers, signer)
 
-	signers, err := agentClient.Signers()
-	if err != nil {
-		return nil, fmt.Errorf("failed to list SSH agent signers: %w", err)
-	}
-	if len(signers) == 0 {
-		return nil, fmt.Errorf("no SSH keys loaded in the SSH agent")
-	}
-
-	if state != nil && state.ClientKey != nil {
-		for _, signer := range signers {
-			if bytes.Equal(signer.PublicKey().Marshal(), state.ClientKey.Marshal()) {
-				types.LogDebug("Using the same SSH key that authenticated to the proxy")
-				return ssh.PublicKeys(signer), nil
-			}
-		}
-		types.LogDebug("Authenticated key not found in agent, falling back to available SSH agent keys")
-	}
-
+	types.LogDebug("authMethodForClient: returning %d signer(s)", len(signers))
 	return ssh.PublicKeys(signers...), nil
 }
 
@@ -182,9 +167,18 @@ func BidiProxy(clientChan io.ReadWriteCloser, targetChan io.ReadWriteCloser, rec
 }
 
 // GetSSHAgentConn gets a connection to the forwarded SSH agent for the current client session.
+// Returns (nil, nil) if agent forwarding was not requested.
 func GetSSHAgentConn(state *types.SessionState) (agent.Agent, error) {
-	if state != nil && state.IsAgentRequested() && state.ClientConn != nil {
-		agentChannel, requests, err := state.ClientConn.OpenChannel("auth-agent@openssh.com", nil)
+	if state == nil {
+		return nil, fmt.Errorf("state is nil (ssh -A to enable agent forwarding)")
+	}
+
+	if client := state.GetAgentClient(); client != nil {
+		return client, nil
+	}
+
+	if state.IsAgentRequested() && state.ClientConnValue() != nil {
+		agentChannel, requests, err := state.ClientConnValue().OpenChannel("auth-agent@openssh.com", nil)
 		if err == nil {
 			go ssh.DiscardRequests(requests)
 			return agent.NewClient(agentChannel), nil
@@ -192,5 +186,38 @@ func GetSSHAgentConn(state *types.SessionState) (agent.Agent, error) {
 		return nil, fmt.Errorf("forwarded SSH agent could not be opened: %w", err)
 	}
 
-	return nil, fmt.Errorf("SSH agent forwarding is required; connect with ssh -A")
+	return nil, nil
+}
+
+// GetAgentSigner retrieves an ssh.Signer from the forwarded SSH agent.
+// The agent should contain the client's private key and certificate for target authentication.
+func GetAgentSigner(state *types.SessionState) (ssh.Signer, error) {
+	if state == nil {
+		return nil, fmt.Errorf("state is nil")
+	}
+
+	agentClient, err := GetSSHAgentConn(state)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get SSH agent connection: %w", err)
+	}
+
+	if agentClient == nil {
+		return nil, fmt.Errorf("SSH agent is not available")
+	}
+
+	signers, err := agentClient.Signers()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get signers from agent: %w", err)
+	}
+
+	if len(signers) == 0 {
+		return nil, fmt.Errorf("no signers available in SSH agent")
+	}
+
+	types.LogDebug("GetAgentSigner: found %d signer(s) in agent", len(signers))
+	for i, s := range signers {
+		types.LogDebug("  signer[%d]: type=%s fingerprint=%s", i, s.PublicKey().Type(), ssh.FingerprintSHA256(s.PublicKey()))
+	}
+
+	return signers[0], nil
 }

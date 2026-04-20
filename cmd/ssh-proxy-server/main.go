@@ -13,6 +13,8 @@ import (
 	appmetrics "ssh-proxy-server/internal/metrics"
 	"ssh-proxy-server/internal/server"
 	"ssh-proxy-server/internal/types"
+
+	"golang.org/x/crypto/ssh"
 )
 
 func main() {
@@ -63,6 +65,28 @@ func main() {
 		types.LogInfo("Prometheus metrics enabled: listen=%s path=%s", cfg.Metrics.Listen, cfg.Metrics.Path)
 	} else {
 		types.LogInfo("Prometheus metrics are disabled")
+	}
+
+	var trustedCACerts []ssh.PublicKey
+	if len(cfg.TrustedCACerts) > 0 {
+		trustedCACerts, err = server.LoadTrustedCACerts(cfg.TrustedCACerts)
+		if err != nil {
+			log.Fatalf("Failed to load trusted CA certificates: %v", err)
+		}
+		types.LogInfo("Loaded %d trusted CA certificate(s) for client certificate authentication", len(trustedCACerts))
+	} else {
+		types.LogInfo("No trusted CA certificates configured for client certificate authentication")
+	}
+
+	var trustedHostCACerts []ssh.PublicKey
+	if len(cfg.TrustedHostCACerts) > 0 {
+		trustedHostCACerts, err = server.LoadTrustedCACerts(cfg.TrustedHostCACerts)
+		if err != nil {
+			log.Fatalf("Failed to load trusted host CA certificates: %v", err)
+		}
+		types.LogInfo("Loaded %d trusted host CA certificate(s) for target host certificate verification", len(trustedHostCACerts))
+	} else {
+		types.LogInfo("No trusted host CA certificates configured for target host certificate verification")
 	}
 
 	routingConfig := server.RoutingConfig{
@@ -122,6 +146,6 @@ func main() {
 			continue
 		}
 
-		go server.HandleConnection(conn, hostKey, cfg.RecordingsDir, cfg.AuthorizedKeys, cfg.AutoAcceptClientKeys, cfg.AllowDirectCommands, cfg.InsecureIgnoreHostKey, cfg.RecordingFormat, routingConfig, ssoConfig)
+		go server.HandleConnection(conn, hostKey, cfg.RecordingsDir, cfg.AuthorizedKeys, cfg.AutoAcceptClientKeys, cfg.AllowDirectCommands, cfg.InsecureIgnoreHostKey, cfg.RecordingFormat, routingConfig, ssoConfig, trustedCACerts, trustedHostCACerts)
 	}
 }

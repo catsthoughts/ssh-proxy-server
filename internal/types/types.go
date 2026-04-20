@@ -8,9 +8,13 @@ import (
 	"ssh-proxy-server/internal/recording"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
 
-var currentLogLevel int
+var (
+	logLevelMu     sync.RWMutex
+	currentLogLevel int
+)
 
 const (
 	LogLevelError = iota
@@ -19,6 +23,8 @@ const (
 )
 
 func SetLogLevel(level string) {
+	logLevelMu.Lock()
+	defer logLevelMu.Unlock()
 	switch level {
 	case "error":
 		currentLogLevel = LogLevelError
@@ -32,13 +38,19 @@ func SetLogLevel(level string) {
 }
 
 func LogInfo(format string, args ...interface{}) {
-	if currentLogLevel >= LogLevelInfo {
+	logLevelMu.RLock()
+	level := currentLogLevel
+	logLevelMu.RUnlock()
+	if level >= LogLevelInfo {
 		log.Printf(format, args...)
 	}
 }
 
 func LogDebug(format string, args ...interface{}) {
-	if currentLogLevel >= LogLevelDebug {
+	logLevelMu.RLock()
+	level := currentLogLevel
+	logLevelMu.RUnlock()
+	if level >= LogLevelDebug {
 		log.Printf(format, args...)
 	}
 }
@@ -48,10 +60,12 @@ type SessionState struct {
 	mu                    sync.RWMutex
 	ClientUser            string
 	ClientKey             ssh.PublicKey
+	ClientSigner          ssh.Signer
 	ClientConn            ssh.Conn
 	AgentRequested        bool
 	AllowDirectCommands   bool
 	InsecureIgnoreHostKey bool
+	TrustedHostCASerts    []ssh.PublicKey
 	RecordingFormat       string
 	StaticRoutingEnabled  bool
 	StaticTargets         []string
@@ -71,6 +85,7 @@ type SessionState struct {
 	SSOEnforceUserMatch   bool
 	SSOInsecureSkipVerify bool
 	SSOVerified           bool
+	AgentClient           agent.Agent
 	TargetHost            string
 	TargetPort            string
 	TargetUser            string
@@ -119,6 +134,24 @@ func (s *SessionState) IsSSOVerified() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.SSOVerified
+}
+
+func (s *SessionState) SetAgentClient(client agent.Agent) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.AgentClient = client
+	s.mu.Unlock()
+}
+
+func (s *SessionState) GetAgentClient() agent.Agent {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.AgentClient
 }
 
 func (s *SessionState) SetEnvVar(name, value string) {
@@ -257,4 +290,76 @@ func (s *SessionState) PTY() (string, int, int) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.PtyTerm, s.PtyCols, s.PtyRows
+}
+
+func (s *SessionState) SetClientUser(user string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.ClientUser = user
+	s.mu.Unlock()
+}
+
+func (s *SessionState) ClientUserValue() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ClientUser
+}
+
+func (s *SessionState) SetClientKey(key ssh.PublicKey) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.ClientKey = key
+	s.mu.Unlock()
+}
+
+func (s *SessionState) ClientKeyValue() ssh.PublicKey {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ClientKey
+}
+
+func (s *SessionState) SetClientSigner(signer ssh.Signer) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.ClientSigner = signer
+	s.mu.Unlock()
+}
+
+func (s *SessionState) ClientSignerValue() ssh.Signer {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ClientSigner
+}
+
+func (s *SessionState) SetClientConn(conn ssh.Conn) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.ClientConn = conn
+	s.mu.Unlock()
+}
+
+func (s *SessionState) ClientConnValue() ssh.Conn {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ClientConn
 }
