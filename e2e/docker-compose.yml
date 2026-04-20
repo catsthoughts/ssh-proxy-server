@@ -1,0 +1,157 @@
+version: '3.8'
+
+services:
+  ca:
+    image: alpine:latest
+    container_name: ssh-ca
+    volumes:
+      - ./e2e-keys:/data
+    environment:
+      - REGENERATE_KEYS=${REGENERATE_KEYS:-false}
+    command: >
+      sh -c '
+        apk add --no-cache openssh-client openssl &&
+        mkdir -p /data/ca /data/clients /data/hosts &&
+        if [ "$REGENERATE_KEYS" = "true" ] || [ ! -f /data/ca/ca_key ]; then rm -f /data/ca/* /data/clients/* /data/hosts/*; fi &&
+        if [ ! -f /data/ca/ca_key ]; then ssh-keygen -t ed25519 -f /data/ca/ca_key -N "" -C "Test CA"; fi &&
+        if [ ! -f /data/ca/ecdsa_ca_key ]; then ssh-keygen -t ecdsa -f /data/ca/ecdsa_ca_key -N "" -C "ECDSA Test CA"; fi &&
+        if [ ! -f /data/clients/user1_key ]; then ssh-keygen -t ed25519 -f /data/clients/user1_key -N "" -C "user1@test"; fi &&
+        if [ ! -f /data/clients/user2_key ]; then ssh-keygen -t ed25519 -f /data/clients/user2_key -N "" -C "user2@test"; fi &&
+        if [ ! -f /data/clients/user3_key ]; then ssh-keygen -t ed25519 -f /data/clients/user3_key -N "" -C "user3@test"; fi &&
+        if [ ! -f /data/clients/user4_key ]; then ssh-keygen -t ed25519 -f /data/clients/user4_key -N "" -C "user4@test"; fi &&
+        if [ ! -f /data/clients/user5_key ]; then ssh-keygen -t ed25519 -f /data/clients/user5_key -N "" -C "user5@test"; fi &&
+        if [ ! -f /data/clients/user6_key ]; then ssh-keygen -t ed25519 -f /data/clients/user6_key -N "" -C "user6@test"; fi &&
+        if [ ! -f /data/clients/user7_key ]; then ssh-keygen -t ed25519 -f /data/clients/user7_key -N "" -C "user7@test"; fi &&
+        if [ ! -f /data/clients/user8_key ]; then ssh-keygen -t ed25519 -f /data/clients/user8_key -N "" -C "user8@test"; fi &&
+        if [ ! -f /data/clients/user9_key ]; then ssh-keygen -t ed25519 -f /data/clients/user9_key -N "" -C "user9@test"; fi &&
+        if [ ! -f /data/clients/user10_key ]; then ssh-keygen -t ed25519 -f /data/clients/user10_key -N "" -C "user10@test"; fi &&
+        if [ ! -f /data/clients/user1_ecdsa_key ]; then ssh-keygen -t ecdsa -f /data/clients/user1_ecdsa_key -N "" -C "user1-ecdsa@test"; fi &&
+        if [ ! -f /data/hosts/target_key ]; then ssh-keygen -t ed25519 -f /data/hosts/target_key -N "" -C "target@host"; fi &&
+        ssh-keygen -s /data/ca/ca_key -I "user1@test" -n testuser -V +1h /data/clients/user1_key.pub &&
+        ssh-keygen -s /data/ca/ca_key -I "user2@test" -n testuser -V +1h /data/clients/user2_key.pub &&
+        ssh-keygen -s /data/ca/ca_key -I "user3@test" -n testuser -V +1h /data/clients/user3_key.pub &&
+        ssh-keygen -s /data/ca/ca_key -I "user4@test" -n testuser -V +1h /data/clients/user4_key.pub &&
+        ssh-keygen -s /data/ca/ca_key -I "user5@test" -n testuser -V +1h /data/clients/user5_key.pub &&
+        ssh-keygen -s /data/ca/ca_key -I "user6@test" -n testuser -V +1h /data/clients/user6_key.pub &&
+        ssh-keygen -s /data/ca/ca_key -I "user7@test" -n testuser -V +1h /data/clients/user7_key.pub &&
+        ssh-keygen -s /data/ca/ca_key -I "user8@test" -n testuser -V +1h /data/clients/user8_key.pub &&
+        ssh-keygen -s /data/ca/ca_key -I "user9@test" -n testuser -V +1h /data/clients/user9_key.pub &&
+        ssh-keygen -s /data/ca/ca_key -I "user10@test" -n testuser -V +1h /data/clients/user10_key.pub &&
+        mv /data/clients/user1_key-cert.pub /data/clients/user1_key_valid-cert.pub &&
+        ssh-keygen -s /data/ca/ca_key -I "user1@test-expired" -n testuser -V 20250101120000:20250101130000 /data/clients/user1_key.pub &&
+        ssh-keygen -s /data/ca/ecdsa_ca_key -I "user1-ecdsa@test" -n testuser -V +1h /data/clients/user1_ecdsa_key.pub &&
+        ssh-keygen -s /data/ca/ca_key -I "target@host" -n localhost -h -V +1h /data/hosts/target_key.pub &&
+        cp /data/ca/ca_key.pub /data/trusted_user_ca.pub &&
+        cp /data/ca/ecdsa_ca_key.pub /data/trusted_ecdsa_user_ca.pub &&
+        cp /data/ca/ca_key.pub /data/trusted_host_ca.pub &&
+        echo "@cert-authority * $(cat /data/ca/ca_key.pub)" > /data/target_authorized_keys &&
+        echo "@cert-authority * $(cat /data/ca/ecdsa_ca_key.pub)" >> /data/target_authorized_keys &&
+        cat /data/clients/user1_key.pub >> /data/target_authorized_keys &&
+        cat /data/clients/user2_key.pub >> /data/target_authorized_keys &&
+        cat /data/clients/user3_key.pub >> /data/target_authorized_keys &&
+        cat /data/clients/user4_key.pub >> /data/target_authorized_keys &&
+        cat /data/clients/user5_key.pub >> /data/target_authorized_keys &&
+        cat /data/clients/user6_key.pub >> /data/target_authorized_keys &&
+        cat /data/clients/user7_key.pub >> /data/target_authorized_keys &&
+        cat /data/clients/user8_key.pub >> /data/target_authorized_keys &&
+        cat /data/clients/user9_key.pub >> /data/target_authorized_keys &&
+        cat /data/clients/user10_key.pub >> /data/target_authorized_keys &&
+        cat /data/clients/user1_ecdsa_key.pub >> /data/target_authorized_keys &&
+        cat /data/clients/user1_key.pub /data/clients/user2_key.pub /data/clients/user3_key.pub /data/clients/user4_key.pub /data/clients/user5_key.pub /data/clients/user6_key.pub /data/clients/user7_key.pub /data/clients/user8_key.pub /data/clients/user9_key.pub /data/clients/user10_key.pub > /data/combined_authorized_keys &&
+        cat /data/clients/user1_ecdsa_key.pub >> /data/combined_authorized_keys &&
+        sleep 365d
+      '
+    networks:
+      - ssh-proxy-net
+    healthcheck:
+      test: ["CMD", "test", "-f", "/data/trusted_user_ca.pub"]
+      interval: 1s
+      timeout: 5s
+      retries: 10
+
+  target:
+    image: alpine:latest
+    container_name: ssh-target
+    hostname: target-host
+    volumes:
+      - ./e2e-keys:/data:ro
+    command: >
+      sh -c '
+        apk add --no-cache openssh-server &&
+        adduser -D -s /bin/sh testuser &&
+        passwd -u testuser 2>/dev/null || true &&
+        mkdir -p /run/sshd /home/testuser /var/empty /home/testuser/.ssh &&
+        cp /data/target_authorized_keys /home/testuser/.ssh/authorized_keys &&
+        chown -R testuser:testuser /home/testuser/.ssh &&
+        chmod 700 /home/testuser/.ssh &&
+        chmod 600 /home/testuser/.ssh/authorized_keys &&
+        if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key -N ""; fi &&
+        chmod 0600 /etc/ssh/ssh_host_ed25519_key &&
+        chmod 0644 /etc/ssh/ssh_host_ed25519_key.pub &&
+        echo "PermitRootLogin no" >> /etc/ssh/sshd_config &&
+        echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config &&
+        echo "PasswordAuthentication no" >> /etc/ssh/sshd_config &&
+        echo "ChallengeResponseAuthentication no" >> /etc/ssh/sshd_config &&
+        echo "UsePAM no" >> /etc/ssh/sshd_config &&
+        echo "AllowUsers testuser" >> /etc/ssh/sshd_config &&
+        echo "AllowAgentForwarding yes" >> /etc/ssh/sshd_config &&
+        echo "AllowTcpForwarding yes" >> /etc/ssh/sshd_config &&
+        echo "TrustedUserCAKeys /data/trusted_user_ca.pub" >> /etc/ssh/sshd_config &&
+        echo "TrustedUserCAKeys /data/trusted_ecdsa_user_ca.pub" >> /etc/ssh/sshd_config &&
+        /usr/sbin/sshd -D -e
+      '
+    networks:
+      - ssh-proxy-net
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "22"]
+      interval: 1s
+      timeout: 5s
+      retries: 10
+
+  proxy:
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile.proxy
+    container_name: ssh-proxy
+    volumes:
+      - ./e2e-keys:/data:ro
+      - ./config.json:/config/proxy.json:ro
+      - ./recordings:/recordings
+      - ./ssh_host_key:/ssh_host_key:ro
+    environment:
+      - SSH_PROXY_LOG_LEVEL=debug
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["/ssh-proxy-server -config /config/proxy.json"]
+    ports:
+      - "2222:2222"
+    networks:
+      - ssh-proxy-net
+    depends_on:
+      ca:
+        condition: service_healthy
+      target:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2222"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  test-runner:
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile.test
+    container_name: ssh-test-runner
+    volumes:
+      - ./e2e-keys:/data:ro
+      - ./test-results:/test-results
+    networks:
+      - ssh-proxy-net
+    depends_on:
+      proxy:
+        condition: service_healthy
+    command: ["tail", "-f", "/dev/null"]
+
+networks:
+  ssh-proxy-net:
+    driver: bridge

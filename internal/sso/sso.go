@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -192,7 +193,30 @@ func AuthenticateDeviceFlow(ctx context.Context, cfg Config, output io.Writer) (
 	return identity, nil
 }
 
+var (
+	clientCache   sync.Map
+	clientCacheMu sync.Mutex
+)
+
+type cachedHTTPClient struct {
+	client   *http.Client
+	refCount int
+}
+
 func httpClient(cfg Config) *http.Client {
+	cacheKey := fmt.Sprintf("%v_%d", cfg.InsecureSkipVerify, cfg.RequestTimeout)
+
+	if cached, ok := clientCache.Load(cacheKey); ok {
+		return cached.(*cachedHTTPClient).client
+	}
+
+	clientCacheMu.Lock()
+	defer clientCacheMu.Unlock()
+
+	if cached, ok := clientCache.Load(cacheKey); ok {
+		return cached.(*cachedHTTPClient).client
+	}
+
 	timeout := time.Duration(DefaultRequestTimeoutSeconds) * time.Second
 	if cfg.RequestTimeout > 0 {
 		timeout = cfg.RequestTimeout
@@ -203,6 +227,8 @@ func httpClient(cfg Config) *http.Client {
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // user-configured for self-signed certs
 		}
 	}
+
+	clientCache.Store(cacheKey, &cachedHTTPClient{client: client})
 	return client
 }
 

@@ -60,6 +60,8 @@ type Config struct {
 	StaticRouting         StaticRoutingConfig `json:"static_routing"`
 	Metrics               MetricsConfig       `json:"metrics"`
 	SSO                   SSOConfig           `json:"sso"`
+	TrustedCACerts        []string            `json:"trusted_ca_certs"`
+	TrustedHostCACerts    []string            `json:"trusted_host_ca_certs"`
 }
 
 // Default returns the default application configuration.

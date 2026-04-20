@@ -15,7 +15,8 @@ It accepts SSH connections with public key authentication, can either auto-accep
 ## Features
 
 - **Authorized Client Access**: Accept client keys automatically by default, or enforce checks against the file configured in `authorized_keys`
-- **SSH Agent Reuse**: Requires forwarded agent access via `ssh -A` by default
+- **SSH Agent Reuse**: Requires forwarded agent access via `ssh -A` for target authentication
+- **Certificate Support**: Supports SSH certificate-based authentication with `TrustedUserCAKeys` configuration - see **[CERTIFICATES.md](CERTIFICATES.md)** for setup examples
 - **Session Recording**: Records proxied terminal activity in either `asciinema` (`.cast`) or plain `script` transcript (`.log`) format with private file permissions for audit and analysis
 - **Terminal-Only by Default**: Accepts interactive `shell` sessions out of the box; direct `exec` requests stay disabled unless `allow_direct_commands` is enabled in the JSON config
 - **Dynamic or Static Routing**: Use `LC_SSH_SERVER=host[:port]` or enable `static_routing` with failover / round-robin
@@ -377,4 +378,6 @@ internal/
 
 - **[QUICKSTART.md](QUICKSTART.md)** - Get started in minutes
 - **[SENDENV.md](SENDENV.md)** - Detailed SendEnv configuration and examples
+- **[CERTIFICATES.md](CERTIFICATES.md)** - SSH certificate setup, generation, and usage
 - **[IMPLEMENTATION.md](IMPLEMENTATION.md)** - Architecture, design, and advanced features
+- **[E2E.md](E2E.md)** - End-to-end tests documentation

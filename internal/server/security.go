@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -50,6 +51,28 @@ func isAuthorizedClientKey(key ssh.PublicKey, authorizedKeysPath string, autoAcc
 	return fmt.Errorf("unauthorized public key: %s", ssh.FingerprintSHA256(key))
 }
 
+func isAuthorizedClientKeyWithCA(key ssh.PublicKey, authorizedKeysPath string, trustedCACerts []ssh.PublicKey, autoAcceptClientKeys bool) error {
+	if autoAcceptClientKeys {
+		return nil
+	}
+
+	if cert, ok := key.(*ssh.Certificate); ok {
+		for _, ca := range trustedCACerts {
+			if bytes.Equal(cert.SignatureKey.Marshal(), ca.Marshal()) {
+				if cert.ValidBefore == 0 || cert.ValidBefore > uint64(time.Now().Unix()) {
+					return nil
+				}
+				return fmt.Errorf("certificate is expired")
+			}
+		}
+		if len(trustedCACerts) > 0 {
+			return fmt.Errorf("certificate signed by unknown CA: %s", ssh.FingerprintSHA256(key))
+		}
+	}
+
+	return isAuthorizedClientKey(key, authorizedKeysPath, false)
+}
+
 func getAuthorizedKeysPath(configuredPath string) (string, error) {
 	if path := strings.TrimSpace(configuredPath); path != "" {
 		return path, nil
@@ -61,4 +84,44 @@ func getAuthorizedKeysPath(configuredPath string) (string, error) {
 	}
 
 	return defaultPath, nil
+}
+
+func LoadTrustedCACerts(caCertPaths []string) ([]ssh.PublicKey, error) {
+	var certs []ssh.PublicKey
+	for _, path := range caCertPaths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read CA cert from %s: %w", path, err)
+		}
+		for len(bytes.TrimSpace(data)) > 0 {
+			cert, _, _, rest, err := ssh.ParseAuthorizedKey(data)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse CA cert from %s: %w", path, err)
+			}
+			certs = append(certs, cert)
+			data = rest
+		}
+	}
+	return certs, nil
+}
+
+func LoadCAPublicKeyFromFile(path string) (ssh.PublicKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CA key from %s: %w", path, err)
+	}
+
+	pub, _, _, rest, err := ssh.ParseAuthorizedKey(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CA key from %s: %w", path, err)
+	}
+	if len(bytes.TrimSpace(rest)) > 0 {
+		return nil, fmt.Errorf("CA key file %s contains multiple keys, expected single key", path)
+	}
+
+	return pub, nil
 }
