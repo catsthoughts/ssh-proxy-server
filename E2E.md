@@ -285,6 +285,7 @@ e2e/e2e-keys/
 │   ├── user1_key.pub       # ED25519 public key
 │   ├── user1_key_valid-cert.pub    # Valid certificate (1h, -V +1h)
 │   ├── user1_key-cert.pub          # Expired certificate (for testing rejection)
+│   ├── user2_key ... user10_key    # Same structure as user1_key
 │   ├── user1_ecdsa_key      # ECDSA P-256 private key
 │   ├── user1_ecdsa_key.pub  # ECDSA public key
 │   └── user1_ecdsa_key-cert.pub    # Valid ECDSA certificate
