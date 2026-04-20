@@ -1,6 +1,6 @@
 # E2E Tests
 
-E2E тесты проверяют работу прокси с реальными SSH соединениями через Docker контейнеры.
+E2E tests verify the proxy with real SSH connections using Docker containers.
 
 ## Prerequisites
 
@@ -20,44 +20,44 @@ make e2e-test
 ### TestClientCertificateAuth
 **Client authentication with certificate via agent forwarding**
 
-Клиент аутентифицируется на прокси с сертификатом, затем использует SSH agent forwarding для аутентификации на target хосте. Сертификат передаётся через SSH агента.
+The client authenticates to the proxy with a certificate, then uses SSH agent forwarding to authenticate to the target host. The certificate is passed through the SSH agent.
 
-**Ожидаемый результат:** SUCCESS - команда выполняется на target через прокси с использованием certificate-based authentication.
+**Expected result:** SUCCESS - command executes on target through proxy using certificate-based authentication.
 
 ### TestClientKeyAuthWithoutCertificate
 **Client authentication with raw key (no certificate)**
 
-Клиент аутентифицируется на прокси с raw key (без сертификата), затем использует SSH agent forwarding для аутентификации на target хосте.
+The client authenticates to the proxy with a raw key (without certificate), then uses SSH agent forwarding to authenticate to the target host.
 
-**Ожидаемый результат:** SUCCESS - команда выполняется на target через прокси с использованием raw key authentication.
+**Expected result:** SUCCESS - command executes on target through proxy using raw key authentication.
 
 ### TestHostCertificateVerification
 **Host certificate verification**
 
-Тестирует что прокси правильно верифицирует host certificate target хоста. Клиент подключается через прокси к target, который имеет certificate, подписанный CA.
+Tests that the proxy correctly verifies the target host's certificate. The client connects through the proxy to a target that has a CA-signed certificate.
 
-**Ожидаемый результат:** SUCCESS - host certificate verification работает корректно.
+**Expected result:** SUCCESS - host certificate verification works correctly.
 
 ### TestMultipleConcurrentSessions
 **10 sequential sessions with different users**
 
-Последовательно запускает 10 сессий, каждая с уникальным пользователем (user1-user10), использующим свой уникальный ключ и сертификат.
+Sequentially runs 10 sessions, each with a unique user (user1-user10) using their unique key and certificate.
 
-**Ожидаемый результат:** Все 10 сессий SUCCEEDED.
+**Expected result:** All 10 sessions SUCCEEDED.
 
 ### TestOneUserRandomConcurrentSessions
 **Random concurrent sessions for 10 users**
 
-Запускает 10 пользователей, каждый с случайным количеством concurrent сессий (1-5). Всего ~30 concurrent сессий.
+Runs 10 users, each with a random number of concurrent sessions (1-5). Total ~30 concurrent sessions.
 
-**Ожидаемый результат:** SUCCESS - все concurrent сессии завершаются успешно.
+**Expected result:** SUCCESS - all concurrent sessions complete successfully.
 
 ### TestSequentialUsers
 **Sequential testing with 1-5 users**
 
-Тестирует 1, 2, 3, 4, 5 пользователей последовательно. Каждый пользователь использует уникальный ключ и сертификат.
+Tests 1, 2, 3, 4, 5 users sequentially. Each user uses a unique key and certificate.
 
-**Ожидаемый результат:** Все пользователи от 1 до 5 успешно аутентифицируются.
+**Expected result:** All users from 1 to 5 authenticate successfully.
 
 ## Makefile Targets
 
@@ -80,33 +80,33 @@ make e2e-test
 
 | Key Type | Supported | Notes |
 |----------|-----------|-------|
-| ED25519 | ✅ Yes | Рекомендуемый тип |
-| ECDSA P-256 | ✅ Yes | Поддерживается |
-| RSA | ❌ No | Не поддерживается в тестах |
+| ED25519 | ✅ Yes | Recommended type |
+| ECDSA P-256 | ✅ Yes | Supported |
+| RSA | ❌ No | Not supported in tests |
 
 ### Certificate Types
 
 | Certificate Type | Agent Forwarding | Notes |
 |-----------------|------------------|-------|
-| ED25519-CERT | ✅ Yes | Работает с TrustedUserCAKeys |
-| ECDSA-CERT | ✅ Yes | Работает с TrustedUserCAKeys |
+| ED25519-CERT | ✅ Yes | Works with TrustedUserCAKeys |
+| ECDSA-CERT | ✅ Yes | Works with TrustedUserCAKeys |
 
 ### Required SSHd Configuration for Certificate Auth
 
-Для поддержки certificate-based authentication на target SSH сервере, необходимо добавить `TrustedUserCAKeys`:
+To support certificate-based authentication on the target SSH server, add `TrustedUserCAKeys`:
 
 ```
 TrustedUserCAKeys /path/to/ca_key.pub
 ```
 
-Эта директива указывает sshd доверять сертификатам, подписанным указанным CA ключом.
+This directive tells sshd to trust certificates signed by the specified CA key.
 
 ## Key and Certificate Generation Examples
 
 ### 1. Generate CA Key
 
 ```bash
-# ED25519 CA (рекомендуется)
+# ED25519 CA (recommended)
 ssh-keygen -t ed25519 -f ca_key -N "" -C "My CA"
 
 # ECDSA P-256 CA
