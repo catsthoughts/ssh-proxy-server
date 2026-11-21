@@ -1,0 +1,13 @@
+FROM golang:1.21-alpine
+
+WORKDIR /tests
+
+COPY e2e/go.mod e2e/go.sum ./
+RUN go mod download
+
+COPY e2e/ .
+
+# In-container suite (sequential, multi-session, certificate tests). The
+# host-run suite (acl_test.go, client_test.go) is excluded via the
+# e2econtainer build tag.
+CMD ["go", "test", "-v", "-count=1", "-timeout", "600s", "-tags", "e2econtainer", "."]

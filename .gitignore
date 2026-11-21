@@ -44,3 +44,6 @@ e2e/ssh_host_key
 e2e/ssh_host_key.pub
 e2e/test_binary
 e2e/*.test
+
+# ...but keep the container test-suite Dockerfile
+!e2e/Dockerfile.test
