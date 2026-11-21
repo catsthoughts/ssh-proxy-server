@@ -185,7 +185,11 @@ services:
     depends_on:
       proxy:
         condition: service_healthy
-    command: ["tail", "-f", "/dev/null"]
+    # Must match the Dockerfile.test CMD: `docker compose run --rm
+    # test-runner` (documented in E2E.md) executes this service command,
+    # not the image CMD — a placeholder like `tail -f /dev/null` would
+    # hang the run silently.
+    command: ["go", "test", "-v", "-count=1", "-timeout", "600s", "-tags", "e2econtainer", "."]
 
 networks:
   ssh-proxy-net:
