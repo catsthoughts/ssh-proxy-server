@@ -121,13 +121,109 @@ func TestCompileValidation(t *testing.T) {
 		t.Fatal("expected error for invalid default")
 	}
 	if _, err := Compile(Config{Enabled: true, Rules: []Rule{{User: "", Targets: []string{"x"}}}}); err == nil {
-		t.Fatal("expected error for empty rule user")
+		t.Fatal("expected error for rule with neither user nor groups")
 	}
 	if _, err := Compile(Config{Enabled: true, Rules: []Rule{{User: "a", Targets: nil}}}); err == nil {
 		t.Fatal("expected error for rule without targets")
 	}
 	if _, err := Compile(Config{Enabled: true, Rules: []Rule{{User: "a", Targets: []string{"bad host"}}}}); err == nil {
 		t.Fatal("expected error for target with unsafe characters")
+	}
+	if _, err := Compile(Config{Enabled: true, Rules: []Rule{{User: "a", Targets: []string{"10.0.0.0/33"}}}}); err == nil {
+		t.Fatal("expected error for invalid CIDR range")
+	}
+	if _, err := Compile(Config{Enabled: true, Rules: []Rule{{User: "a", Groups: []string{" "}, Targets: []string{"x"}}}}); err == nil {
+		t.Fatal("expected error for empty group entry")
+	}
+}
+
+func TestCompileAllowsGroupOnlyRule(t *testing.T) {
+	acl, err := Compile(Config{Enabled: true, Default: "deny", Rules: []Rule{
+		{Groups: []string{"ssh-admins"}, Targets: []string{"web1.example.com"}},
+	}})
+	if err != nil {
+		t.Fatalf("Compile() returned error for group-only rule: %v", err)
+	}
+	if !acl.Allowed("anyone", "web1.example.com", "22", "ssh-admins") {
+		t.Fatal("group-only rule should allow members of the group")
+	}
+	if acl.Allowed("anyone", "web1.example.com", "22") {
+		t.Fatal("group-only rule should reject users without the group")
+	}
+}
+
+func TestCIDRMatching(t *testing.T) {
+	acl := compile(t, Config{
+		Enabled: true,
+		Default: "deny",
+		Rules: []Rule{
+			{User: "alice", Targets: []string{"10.0.0.0/8", "192.168.0.0/16"}},
+		},
+	})
+
+	for host, port := range map[string]string{
+		"10.1.2.3":       "22",
+		"192.168.5.5":    "22",
+		"10.255.255.255": "22",
+	} {
+		if !acl.Allowed("alice", host, port) {
+			t.Fatalf("CIDR rule should allow alice to %s:%s", host, port)
+		}
+	}
+	if acl.Allowed("alice", "11.0.0.1", "22") {
+		t.Fatal("10.0.0.0/8 should not contain 11.0.0.1")
+	}
+	if acl.Allowed("alice", "10.1.2.3", "2222") {
+		t.Fatal("CIDR pattern without port should only match the default port 22")
+	}
+	if acl.Allowed("alice", "web1.example.com", "22") {
+		t.Fatal("CIDR rules must not match non-IP hosts")
+	}
+	if acl.Allowed("bob", "10.1.2.3", "22") {
+		t.Fatal("bob has no rule; default deny should reject")
+	}
+}
+
+func TestGroupRuleMatching(t *testing.T) {
+	acl := compile(t, Config{
+		Enabled: true,
+		Default: "deny",
+		Rules: []Rule{
+			{Groups: []string{"ssh-admins", "sre-oncall"}, Targets: []string{"db.example.com"}},
+		},
+	})
+
+	if !acl.Allowed("anyone", "db.example.com", "22", "SSH-Admins") {
+		t.Fatal("group matching should be case-insensitive")
+	}
+	if !acl.Allowed("anyone", "db.example.com", "22", "sre-oncall") {
+		t.Fatal("listed group should match")
+	}
+	if acl.Allowed("anyone", "db.example.com", "22", "other-group") {
+		t.Fatal("unrelated group should not match")
+	}
+	if acl.Allowed("anyone", "db.example.com", "22") {
+		t.Fatal("user without any SSO group should be denied")
+	}
+}
+
+func TestRuleWithUserAndGroupsAppliesToEither(t *testing.T) {
+	acl := compile(t, Config{
+		Enabled: true,
+		Default: "deny",
+		Rules: []Rule{
+			{User: "deploy", Groups: []string{"deployers"}, Targets: []string{"ci.example.com"}},
+		},
+	})
+
+	if !acl.Allowed("deploy", "ci.example.com", "22") {
+		t.Fatal("rule should apply to the named user")
+	}
+	if !acl.Allowed("alice", "ci.example.com", "22", "deployers") {
+		t.Fatal("rule should apply to group members")
+	}
+	if acl.Allowed("alice", "ci.example.com", "22") {
+		t.Fatal("rule should not apply to unrelated users")
 	}
 }
 

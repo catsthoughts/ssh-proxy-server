@@ -10,6 +10,14 @@
   "recording_format": "asciinema",
   "retries": 1,
   "connect_timeout_seconds": 10,
+  "access_control": {
+    "enabled": true,
+    "default": "deny",
+    "rules": [
+      {"user": "testuser", "targets": ["target-host"]},
+      {"user": "alice", "targets": ["target-host:22"]}
+    ]
+  },
   "trusted_ca_certs": ["/data/trusted_user_ca.pub", "/data/trusted_ecdsa_user_ca.pub"],
   "trusted_host_ca_certs": [],
   "static_routing": {

@@ -88,6 +88,8 @@ type SessionState struct {
 	SSOInsecureSkipVerify bool
 	SSORequiredGroups     []string
 	SSOVerified           bool
+	SSOResult             string
+	SSOGroups             []string
 	AgentClient           agent.Agent
 	AgentChannel          ssh.Channel
 	TargetHost            string
@@ -146,6 +148,46 @@ func (s *SessionState) IsSSOVerified() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.SSOVerified
+}
+
+// SetSSOResult records the SSO outcome ("success", "failure",
+// "not_required") so session lifecycle audit events can carry it.
+func (s *SessionState) SetSSOResult(result string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.SSOResult = result
+	s.mu.Unlock()
+}
+
+func (s *SessionState) SSOResultValue() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.SSOResult
+}
+
+// SetSSOGroups stores the SSO identity groups for access control evaluation
+// (access_control rules may grant targets to groups, not just to users).
+func (s *SessionState) SetSSOGroups(groups []string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.SSOGroups = append([]string(nil), groups...)
+	s.mu.Unlock()
+}
+
+func (s *SessionState) SSOGroupsValue() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]string(nil), s.SSOGroups...)
 }
 
 func (s *SessionState) SetAgentClient(client agent.Agent) {

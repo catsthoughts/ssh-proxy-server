@@ -25,7 +25,8 @@
     "default": "deny",
     "rules": [
       { "user": "alice", "targets": ["web-*.prod.example.com", "db.example.com:5433"] },
-      { "user": "deploy-*", "targets": ["*"] }
+      { "user": "deploy-*", "targets": ["*"] },
+      { "groups": ["ssh-admins"], "targets": ["10.0.0.0/8", "192.168.1.0/24"] }
     ]
   },
   "rate_limit": {

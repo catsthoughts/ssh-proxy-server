@@ -1,11 +1,60 @@
 # SSH Proxy Server - Release Notes
 
+## Pre-production fixes
+
+0. **FR-1.1/FR-1.2 CIDR and SSO-group ACL rules** — `access_control` rules now
+   accept CIDR target patterns (`10.0.0.0/8` matches target host IPs in the
+   range on the default port) and an optional `groups` list: the rule applies
+   when `user` matches the SSH login user or the client is a member of one of
+   the listed SSO groups (case-insensitive, `user` may be omitted). Groups
+   come from the SSO identity after device authorization and are evaluated on
+   both the `LC_SSH_SERVER` and the static-routing paths.
+
+0. **FR-2.1 session lifecycle events enriched** — `session_start` and all
+   `session_end` variants now carry `key_fingerprint` (of the client's public
+   key) and `sso_result` (`success` / `failure` / `not_required`), so a single
+   event per session holds the identity proof AC FR-1 requires; correlation by
+   `session_id` remains available for the auth/sso event stream.
+
+1. **FR-1.3 e2e coverage for ACL** — `e2e/acl_test.go` (host-run) covers both ACL
+   enforcement points: static routing (`connectToFirstAvailableTarget`,
+   proxy on `:2222`) and `LC_SSH_SERVER` env requests (`handleEnvRequest`,
+   dedicated `proxy-acl` instance on `:2223` with dynamic routing). alice is
+   allowed, bob (no rule, `default: deny`) is refused on both paths.
+   Unit regressions for the client-vs-target user bug:
+   `TestHandleEnvRequestAllowsCrossUserTargetWhenClientUserAllowed`,
+   `TestHandleEnvRequestDeniesWhenClientUserNotAllowed`,
+   `TestResolveTargetAddressKeepsExplicitTargetUser` (explicit target user is
+   preserved; the ACL decision is always made for the SSH login user).
+   Verified against live Docker infrastructure: all 9 host-run tests pass,
+   plus the full in-container suite (certificate/sequential/multi-session)
+   with `access_control` enabled on both proxies. Companion fixes:
+   `docker-compose.yml` now waits for the CA to be healthy before starting
+   the target (the target previously raced the key generation and exited),
+   the missing `e2e/Dockerfile.test` was added, host-only and container-only
+   test files are separated by the `e2econtainer` build tag, and a repo-root
+   `.dockerignore` keeps `e2e-keys`/recordings out of image build contexts.
+
+2. **FR-2.3 env value leak fixed** — debug logging no longer prints SendEnv
+   variable values (they may carry client tokens); only variable names are
+   logged (`name=<redacted>`). Regression: `TestHandleEnvRequestDoesNotLogEnvValues`.
+
+3. **FR-3.1 config watch survives atomic saves** — `internal/configwatch` now
+   watches the parent directory of each config-related file (filtered by file
+   name) instead of the file inode, so vim-style save-by-rename no longer
+   silently drops the watch. SIGHUP remains as a fallback. Covered by
+   `TestWatchDetectsAtomicRenameReplace` and friends.
+
+4. **FR-2.2 audit events carry `level`** — `audit.Event` has a `level` field
+   (`info`/`warning`, derived from `result` when not set explicitly) so
+   Loki/Alertmanager can filter/alert on severity without parsing free text.
+
 ## Security Hardening (FR-1..FR-4 + Should/Could)
 
 ### Must (production gate)
 
 1. **FR-1 Target ACL** (`internal/access`, `access_control` config section)
-   - Per-user rules `{"user": "name-or-glob", "targets": ["host[:port]", "web-*.prod", "*"]}`
+   - Per-user rules `{"user": "name-or-glob", "groups": ["sso-group"], "targets": ["host[:port]", "web-*.prod", "10.0.0.0/8", "*"]}` (groups optional; CIDR ranges match target host IPs on the default port)
    - `default: allow|deny` for users without a matching rule
    - Enforced both on `LC_SSH_SERVER` parsing and on every target connection attempt (covers static routing, failover retries, and SFTP)
    - Denials are logged and audited as `target_denied`

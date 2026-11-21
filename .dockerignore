@@ -1,0 +1,18 @@
+# Keep test keys, recordings and VCS metadata out of all image build contexts
+.git/
+e2e/e2e-keys/
+e2e/recordings/
+e2e/test-results/
+e2e/ssh_host_key
+e2e/ssh_host_key.pub
+e2e/test_binary
+e2e/*.test
+/ssh_host_key
+/ssh_host_key.pub
+/authorized_keys
+/config.json
+/recordings/
+bin/
+build/
+dist/
+*.log

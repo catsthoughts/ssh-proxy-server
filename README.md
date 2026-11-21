@@ -15,7 +15,7 @@ It accepts SSH connections with public key authentication, can either auto-accep
 ## Features
 
 - **Authorized Client Access**: Accept client keys automatically by default, or enforce checks against the file configured in `authorized_keys`
-- **Target ACL (FR-1)**: `access_control` restricts which targets each authenticated SSH user may reach, with `host[:port]` glob patterns (`web-*.prod`, `10.0.*`, `*`) and an allow/deny default
+- **Target ACL (FR-1)**: `access_control` restricts which targets each authenticated SSH user may reach, with `host[:port]` glob patterns (`web-*.prod`, `10.0.*`, `*`), CIDR ranges (`10.0.0.0/8`), SSO-group rules, and an allow/deny default
 - **SSH Agent Reuse**: Requires forwarded agent access via `ssh -A` for target authentication
 - **Certificate Support**: Supports SSH certificate-based authentication with `TrustedUserCAKeys` configuration - see **[CERTIFICATES.md](CERTIFICATES.md)** for setup examples
 - **Session Recording**: Records proxied terminal activity in either `asciinema` (`.cast`) or plain `script` transcript (`.log`) format with private file permissions for audit and analysis
@@ -131,7 +131,7 @@ Key JSON settings:
 - `static_routing.mode` — `failover` or `round_robin`
 - `access_control.enabled` — enforces the per-user target ACL (FR-1); when disabled any authenticated client may reach any target
 - `access_control.default` — `deny` (default) or `allow` for users without a matching rule
-- `access_control.rules` — list of `{"user": "name-or-glob", "targets": ["host[:port]", "web-*.prod", "*"]}` entries; a pattern without a port matches the default SSH port 22 only
+- `access_control.rules` — list of `{"user": "name-or-glob", "groups": ["sso-group"], "targets": [...]}` entries; a rule applies when its `user` pattern matches the SSH login user or the client belongs to one of `groups` (SSO groups, case-insensitive; `user` may be omitted when `groups` is set). Targets may be `host[:port]` glob patterns (`web-*.prod`, `10.0.*`, `*`) or CIDR ranges (`10.0.0.0/8`); a pattern without a port matches the default SSH port 22 only. The SSH login user is always used for the ACL decision — an explicitly requested different target user (`other@host`) does not affect it
 - `known_hosts` — path to a centralized target host-key file; empty (default) falls back to `~/.ssh/known_hosts`
 - `sftp_enabled` — allows proxying the `sftp` subsystem to the target (default `false`)
 - `rate_limit.enabled` / `rate_limit.max_per_minute` — caps inbound SSH handshakes per source IP per minute
@@ -152,7 +152,7 @@ Key JSON settings:
 
 ### Hot reload
 
-Send `SIGHUP` to the proxy process (or edit the config file in place — changes are picked up via fsnotify):
+Send `SIGHUP` to the proxy process (or save the config file — including atomic save-by-rename as done by vim — changes are picked up via fsnotify):
 
 ```bash
 kill -HUP $(pidof ssh-proxy-server)
@@ -165,10 +165,10 @@ The config, ACL, trusted CA certificates, log level, and rate limit are rebuilt 
 Every security-relevant event is emitted as one JSON object per line on stdout, designed for a journald → Loki → Alertmanager pipeline:
 
 ```json
-{"ts":"2026-11-21T12:50:58Z","event":"session_end","session_id":"...","user":"alice","client_addr":"10.1.2.3:51620","target_user":"alice","target_host":"localhost","target_port":"2298","recording_id":"...","result":"success","exit_status":0,"duration_s":42.5}
+{"ts":"2026-11-21T12:50:58Z","event":"session_end","level":"info","session_id":"...","user":"alice","client_addr":"10.1.2.3:51620","target_user":"alice","target_host":"localhost","target_port":"2298","recording_id":"...","result":"success","exit_status":0,"duration_s":42.5}
 ```
 
-Event types: `auth_success`, `auth_failure`, `target_denied`, `session_start`, `session_end`, `sso_success`, `sso_failure`, `handshake_rate_limited`. Regular (non-JSON) diagnostics stay in the same stdout stream; filter lines starting with `{` for the audit stream.
+Event types: `auth_success`, `auth_failure`, `target_denied`, `session_start`, `session_end`, `sso_success`, `sso_failure`, `handshake_rate_limited`. `session_start`/`session_end` carry `key_fingerprint` (client key) and `sso_result` (`success`/`failure`/`not_required`), so each session is fully described by its lifecycle events; the `auth_*`/`sso_*` stream correlates to them via `session_id`. Every event carries a `level` field (`info`, or `warning` for `denied`/`failure` results) so Loki/Alertmanager can filter and alert on severity. Regular (non-JSON) diagnostics stay in the same stdout stream; filter lines starting with `{` for the audit stream. Environment variable values from SendEnv are never logged (they may carry client tokens).
 
 You can store recordings in a custom directory by setting `"recordings_dir": "/path/to/recordings"` in the JSON config.
 

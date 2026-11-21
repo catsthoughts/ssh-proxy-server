@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -18,6 +19,7 @@ import (
 type Event struct {
 	Timestamp   time.Time `json:"ts"`
 	Event       string    `json:"event"`
+	Level       string    `json:"level"`
 	SessionID   string    `json:"session_id,omitempty"`
 	User        string    `json:"user,omitempty"`
 	ClientAddr  string    `json:"client_addr,omitempty"`
@@ -25,11 +27,23 @@ type Event struct {
 	TargetUser  string    `json:"target_user,omitempty"`
 	TargetHost  string    `json:"target_host,omitempty"`
 	TargetPort  string    `json:"target_port,omitempty"`
+	SSOResult   string    `json:"sso_result,omitempty"`
 	RecordingID string    `json:"recording_id,omitempty"`
 	Result      string    `json:"result,omitempty"`
 	ExitStatus  *int      `json:"exit_status,omitempty"`
 	DurationSec float64   `json:"duration_s,omitempty"`
 	Reason      string    `json:"reason,omitempty"`
+}
+
+// DeriveLevel maps an event result to a severity level so Loki/Alertmanager
+// can filter on it without free-text parsing.
+func DeriveLevel(result string) string {
+	switch strings.ToLower(strings.TrimSpace(result)) {
+	case "denied", "failure":
+		return "warning"
+	default:
+		return "info"
+	}
 }
 
 // Int returns a pointer to an int, for setting optional numeric fields such
@@ -59,6 +73,9 @@ func (l *Logger) Log(e Event) {
 	}
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
+	}
+	if e.Level == "" {
+		e.Level = DeriveLevel(e.Result)
 	}
 	line, err := json.Marshal(e)
 	if err != nil {

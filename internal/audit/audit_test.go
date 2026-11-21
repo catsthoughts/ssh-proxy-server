@@ -19,6 +19,7 @@ func TestLoggerWritesJSONLine(t *testing.T) {
 		User:        "alice",
 		TargetHost:  "web1.example.com",
 		TargetPort:  "22",
+		SSOResult:   "success",
 		RecordingID: "rec-123",
 		Result:      "success",
 		ExitStatus:  Int(0),
@@ -37,10 +38,12 @@ func TestLoggerWritesJSONLine(t *testing.T) {
 
 	for key, want := range map[string]interface{}{
 		"event":        "session_end",
+		"level":        "info",
 		"session_id":   "sess-1",
 		"user":         "alice",
 		"target_host":  "web1.example.com",
 		"target_port":  "22",
+		"sso_result":   "success",
 		"recording_id": "rec-123",
 		"result":       "success",
 	} {
@@ -75,6 +78,40 @@ func TestLoggerOmitsEmptyFields(t *testing.T) {
 func TestNilLoggerIsSafe(t *testing.T) {
 	var logger *Logger
 	logger.Log(Event{Event: "noop"}) // must not panic
+}
+
+func TestLoggerDerivesLevelFromResult(t *testing.T) {
+	var buf bytes.Buffer
+	logger := New(&buf)
+
+	logger.Log(Event{Event: "target_denied", Result: "denied"})
+	logger.Log(Event{Event: "sso_failure", Result: "failure"})
+	logger.Log(Event{Event: "custom", Result: "success", Level: "debug"})
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 audit lines, got %d", len(lines))
+	}
+
+	var decoded map[string]interface{}
+	if err := json.Unmarshal([]byte(lines[0]), &decoded); err != nil {
+		t.Fatalf("invalid audit line %q: %v", lines[0], err)
+	}
+	if decoded["level"] != "warning" {
+		t.Fatalf("level for denied event = %v, want warning", decoded["level"])
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &decoded); err != nil {
+		t.Fatalf("invalid audit line %q: %v", lines[1], err)
+	}
+	if decoded["level"] != "warning" {
+		t.Fatalf("level for failure event = %v, want warning", decoded["level"])
+	}
+	if err := json.Unmarshal([]byte(lines[2]), &decoded); err != nil {
+		t.Fatalf("invalid audit line %q: %v", lines[2], err)
+	}
+	if decoded["level"] != "debug" {
+		t.Fatalf("explicit level = %v, want debug", decoded["level"])
+	}
 }
 
 func TestLoggerSerializesConcurrentWrites(t *testing.T) {

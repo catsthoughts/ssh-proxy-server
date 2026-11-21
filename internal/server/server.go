@@ -222,6 +222,9 @@ func HandleConnection(conn net.Conn, hostKey ssh.Signer, cfg ConnectionConfig) {
 	if state.ConnectTimeout <= 0 {
 		state.ConnectTimeout = time.Duration(DefaultConnectTimeoutSeconds) * time.Second
 	}
+	if !cfg.SSO.Enabled {
+		state.SSOResult = "not_required"
+	}
 	if state.ConnectRetries < 0 {
 		state.ConnectRetries = 0
 	}
@@ -500,6 +503,7 @@ func ensureSSOAuthentication(channel ssh.Channel, state *types.SessionState) err
 		metrics.RecordSSOConfirmation("failure")
 		metrics.RecordSSOError()
 		types.LogInfo("SSO confirmation failed: client=%s provider=%s realm=%s err=%v", clientUser, cfg.Provider, cfg.Realm, err)
+		state.SetSSOResult("failure")
 		auditEvent(state, auditpkg.Event{
 			Event:  "sso_failure",
 			User:   clientUser,
@@ -515,10 +519,12 @@ func ensureSSOAuthentication(channel ssh.Channel, state *types.SessionState) err
 			identifier := identity.BestIdentifier()
 			if identifier == "" {
 				err := fmt.Errorf("SSO confirmation succeeded but did not provide an identity that can be matched to SSH user %q", clientUser)
+				state.SetSSOResult("failure")
 				auditEvent(state, auditpkg.Event{Event: "sso_failure", User: clientUser, Result: "failure", Reason: err.Error()})
 				return err
 			}
 			err := fmt.Errorf("SSO identity %q does not match SSH user %q", identifier, clientUser)
+			state.SetSSOResult("failure")
 			auditEvent(state, auditpkg.Event{Event: "sso_failure", User: clientUser, Result: "failure", Reason: err.Error()})
 			return err
 		}
@@ -529,10 +535,13 @@ func ensureSSOAuthentication(channel ssh.Channel, state *types.SessionState) err
 		metrics.RecordSSOError()
 		err := fmt.Errorf("SSO identity %q is missing required group(s): %s", identity.BestIdentifier(), strings.Join(missing, ", "))
 		types.LogInfo("SSO group check failed: client=%s err=%v", clientUser, err)
+		state.SetSSOResult("failure")
 		auditEvent(state, auditpkg.Event{Event: "sso_failure", User: clientUser, Result: "denied", Reason: err.Error()})
 		return err
 	}
 	state.SetSSOVerified(true)
+	state.SetSSOResult("success")
+	state.SetSSOGroups(identity.Groups)
 	metrics.RecordSSOConfirmation("success")
 	types.LogInfo("SSO confirmation successful: client=%s provider=%s realm=%s", clientUser, cfg.Provider, cfg.Realm)
 	auditEvent(state, auditpkg.Event{
@@ -570,7 +579,7 @@ func handleEnvRequest(req *ssh.Request, state *types.SessionState) {
 
 	if varName == "LC_SSH_SERVER" {
 		if state != nil && state.StaticRoutingEnabled {
-			types.LogDebug("Ignoring LC_SSH_SERVER=%q because static routing is enabled", varValue)
+			types.LogDebug("Ignoring LC_SSH_SERVER because static routing is enabled")
 			req.Reply(true, nil)
 			return
 		}
@@ -590,7 +599,7 @@ func handleEnvRequest(req *ssh.Request, state *types.SessionState) {
 			return
 		}
 
-		if state != nil && state.ACL != nil && !state.ACL.Allowed(sessionUser, targetHost, targetPort) {
+		if state != nil && state.ACL != nil && !state.ACL.Allowed(sessionUser, targetHost, targetPort, state.SSOGroupsValue()...) {
 			types.LogInfo("Denied target %s for client=%s by access control list", formatTargetAddress(targetUser, targetHost, targetPort), sessionUser)
 			auditEvent(state, auditpkg.Event{
 				Event:      "target_denied",
@@ -606,7 +615,9 @@ func handleEnvRequest(req *ssh.Request, state *types.SessionState) {
 		}
 
 		state.SetEnvVar(varName, varValue)
-		types.LogDebug("Received environment variable: %s=%s", varName, varValue)
+		// Never log environment variable values: SendEnv variables may carry
+		// client tokens (API keys, JWTs) that must not leak into journald/Loki.
+		types.LogDebug("Received environment variable: %s=<redacted>", varName)
 		state.SetTarget(targetUser, targetHost, targetPort)
 		types.LogInfo("Target parsed from LC_SSH_SERVER: user=%s host=%s port=%s", targetUser, targetHost, targetPort)
 		req.Reply(true, nil)
@@ -614,7 +625,9 @@ func handleEnvRequest(req *ssh.Request, state *types.SessionState) {
 	}
 
 	state.SetEnvVar(varName, varValue)
-	types.LogDebug("Received environment variable: %s=%s", varName, varValue)
+	// Never log environment variable values: SendEnv variables may carry
+	// client tokens (API keys, JWTs) that must not leak into journald/Loki.
+	types.LogDebug("Received environment variable: %s=<redacted>", varName)
 	req.Reply(true, nil)
 }
 
@@ -719,9 +732,11 @@ func proxySession(channel ssh.Channel, state *types.SessionState, targetAddr, co
 	auditEvent(state, auditpkg.Event{
 		Event:       "session_start",
 		User:        state.ClientUserValue(),
+		Key:         clientKeyFingerprint(state),
 		TargetUser:  targetUser,
 		TargetHost:  targetHost,
 		TargetPort:  targetPort,
+		SSOResult:   state.SSOResultValue(),
 		RecordingID: recordingID,
 		Result:      "success",
 	})
@@ -808,7 +823,7 @@ func connectToFirstAvailableTarget(state *types.SessionState, targets []string) 
 				continue
 			}
 			if state != nil {
-				if state.ACL != nil && !state.ACL.Allowed(sessionUser, targetHost, targetPort) {
+				if state.ACL != nil && !state.ACL.Allowed(sessionUser, targetHost, targetPort, state.SSOGroupsValue()...) {
 					types.LogInfo("Denied target %s for client=%s by access control list", formatTargetAddress(targetUser, targetHost, targetPort), sessionUser)
 					auditEvent(state, auditpkg.Event{
 						Event:      "target_denied",
@@ -1002,9 +1017,11 @@ func finalizeRemoteSession(channel ssh.Channel, state *types.SessionState, err e
 		auditEvent(state, auditpkg.Event{
 			Event:       "session_end",
 			User:        state.ClientUserValue(),
+			Key:         clientKeyFingerprint(state),
 			TargetUser:  targetUser,
 			TargetHost:  targetHost,
 			TargetPort:  targetPort,
+			SSOResult:   state.SSOResultValue(),
 			RecordingID: state.RecordingIDValue(),
 			Result:      "success",
 			ExitStatus:  auditpkg.Int(0),
@@ -1022,9 +1039,11 @@ func finalizeRemoteSession(channel ssh.Channel, state *types.SessionState, err e
 		auditEvent(state, auditpkg.Event{
 			Event:       "session_end",
 			User:        state.ClientUserValue(),
+			Key:         clientKeyFingerprint(state),
 			TargetUser:  targetUser,
 			TargetHost:  targetHost,
 			TargetPort:  targetPort,
+			SSOResult:   state.SSOResultValue(),
 			RecordingID: state.RecordingIDValue(),
 			Result:      "success",
 			ExitStatus:  auditpkg.Int(exitErr.ExitStatus()),
@@ -1039,9 +1058,11 @@ func finalizeRemoteSession(channel ssh.Channel, state *types.SessionState, err e
 	auditEvent(state, auditpkg.Event{
 		Event:       "session_end",
 		User:        state.ClientUserValue(),
+		Key:         clientKeyFingerprint(state),
 		TargetUser:  targetUser,
 		TargetHost:  targetHost,
 		TargetPort:  targetPort,
+		SSOResult:   state.SSOResultValue(),
 		RecordingID: state.RecordingIDValue(),
 		Result:      "failure",
 		ExitStatus:  auditpkg.Int(1),
@@ -1286,9 +1307,11 @@ func auditSessionEnd(state *types.SessionState, result string, exitStatus int, c
 	e := auditpkg.Event{
 		Event:       "session_end",
 		User:        state.ClientUserValue(),
+		Key:         clientKeyFingerprint(state),
 		TargetUser:  targetUser,
 		TargetHost:  targetHost,
 		TargetPort:  targetPort,
+		SSOResult:   state.SSOResultValue(),
 		RecordingID: state.RecordingIDValue(),
 		Result:      result,
 		ExitStatus:  auditpkg.Int(exitStatus),
@@ -1318,6 +1341,16 @@ func sessionDuration(state *types.SessionState) float64 {
 		return 0
 	}
 	return time.Since(state.SessionStart).Seconds()
+}
+
+// clientKeyFingerprint returns the SHA-256 fingerprint of the client's public
+// key, so session lifecycle audit events carry the same identity proof as
+// auth_success without requiring correlation.
+func clientKeyFingerprint(state *types.SessionState) string {
+	if state == nil || state.ClientKeyValue() == nil {
+		return ""
+	}
+	return ssh.FingerprintSHA256(state.ClientKeyValue())
 }
 
 func buildRecordingFileName(targetUser, targetHost, targetPort, recordingID, recordingFormat string) string {

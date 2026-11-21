@@ -14,7 +14,7 @@ The project is a working Go-based SSH proxy for bastion-style access, auditing, 
 7. can expose Prometheus-compatible metrics using `prometheus/client_golang`, including SSH/session counters, per-target session results, and SSO/2FA waiting/error visibility
 8. forwards PTY allocation and terminal resize events
 9. exposes security controls for client-key policy, direct-command policy, and target host verification
-10. enforces a per-user target ACL (`access_control`), so authenticated clients can only reach explicitly allowed targets
+10. enforces a per-user target ACL (`access_control`), so authenticated clients can only reach explicitly allowed targets; rules match by SSH login user or by SSO group, and targets support globs and CIDR ranges
 11. emits a structured JSON audit log on stdout (who/where/result/recording_id) for journald → Loki → Alertmanager
 12. hot-reloads config, ACL, CA certs, log level, and rate limit on SIGHUP or fsnotify change without breaking active sessions; `authorized_keys` is re-read per authentication
 13. resolves secrets (`$env`/`$file`) for `sso.client_secret`, generates Ed25519 host keys, rate-limits SSH handshakes per source IP, supports a centralized `known_hosts`, checks Keycloak groups, and exposes `/healthz`

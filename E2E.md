@@ -59,11 +59,29 @@ Tests 1, 2, 3, 4, 5 users sequentially. Each user uses a unique key and certific
 
 **Expected result:** All users from 1 to 5 authenticate successfully.
 
+### TestACLStaticRoutingAllowedHost / TestACLStaticRoutingDeniedHost
+**Access control enforcement on the static routing path**
+
+Connects to the main proxy (`localhost:2222`, static routing enabled, `access_control` enabled with `default: deny`):
+- `alice` (rule: `target-host:22`) runs a command and must succeed.
+- `bob` (no rule) runs a command and must be denied.
+
+**Expected result:** alice succeeds, bob is refused.
+
+### TestACLEnvRoutingAllowedHost / TestACLEnvRoutingDeniedHost
+**Access control enforcement on the LC_SSH_SERVER (env request) path**
+
+Connects to the dedicated ACL proxy (`localhost:2223`, dynamic routing, `access_control` enabled with `default: deny`):
+- `alice` sends `LC_SSH_SERVER=testuser@target-host:22` and must be allowed to run a command.
+- `bob` sends the same env request and must be refused.
+
+**Expected result:** alice succeeds, bob is refused.
+
 ## Makefile Targets
 
 | Target | Description |
 |--------|-------------|
-| `make e2e-infra` | Start CA, target, and proxy containers |
+| `make e2e-infra` | Start CA, target, proxy, and proxy-acl containers |
 | `make e2e-test` | Run E2E tests inside Docker container |
 | `make e2e-test-host` | Run E2E tests on host machine |
 | `make e2e-logs` | Show proxy logs |
@@ -73,6 +91,17 @@ Tests 1, 2, 3, 4, 5 users sequentially. Each user uses a unique key and certific
 | `make e2e-regen-keys` | Regenerate all keys and restart CA |
 | `make e2e-rebuild` | Rebuild proxy image and restart |
 | `make e2e-full` | Full cycle: clean + build + test |
+
+## Test Suites
+
+The e2e tests are split into two suites by build tag:
+
+- **Host-run suite** (`acl_test.go`, `client_test.go`; built without tags, names end in `Host`) — connects to `localhost:2222` / `localhost:2223` and needs `./e2e-keys` on the host. Run with `make e2e-test-host`.
+- **Container suite** (`cert_test.go`, `multi_session_test.go`, `sequential_test.go`; built with `-tags e2econtainer`) — runs inside the `test-runner` container on the compose network. Run with `make e2e-test` (or `docker compose run --rm test-runner`).
+
+`Dockerfile.test` builds the test-runner image; the repo-root `.dockerignore` keeps `e2e-keys`, recordings, and test results out of every image build context.
+
+Verified against live infrastructure (2026-11-21): all 9 host-run tests and the full container suite pass with `access_control` enabled (`default: deny`) on both proxies.
 
 ## Supported Keys and Certificates
 
