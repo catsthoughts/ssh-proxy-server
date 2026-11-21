@@ -10,6 +10,8 @@
   "recording_format": "asciinema",
   "retries": 0,
   "connect_timeout_seconds": 10,
+  "known_hosts": "",
+  "sftp_enabled": false,
   "static_routing": {
     "enabled": false,
     "servers": [
@@ -18,10 +20,31 @@
     ],
     "mode": "failover"
   },
+  "access_control": {
+    "enabled": false,
+    "default": "deny",
+    "rules": [
+      { "user": "alice", "targets": ["web-*.prod.example.com", "db.example.com:5433"] },
+      { "user": "deploy-*", "targets": ["*"] }
+    ]
+  },
+  "rate_limit": {
+    "enabled": false,
+    "max_per_minute": 30
+  },
   "metrics": {
     "enabled": false,
     "listen": "127.0.0.1:9090",
     "path": "/metrics"
+  },
+  "health": {
+    "enabled": false,
+    "listen": "127.0.0.1:9091",
+    "path": "/healthz"
+  },
+  "recordings": {
+    "retention_days": 0,
+    "integrity": false
   },
   "sso": {
     "enabled": false,
@@ -35,6 +58,7 @@
     "poll_interval_seconds": 5,
     "connect_timeout_seconds": 10,
     "enforce_ssh_user_match": true,
-    "insecure_skip_verify": false
+    "insecure_skip_verify": false,
+    "required_groups": []
   }
 }

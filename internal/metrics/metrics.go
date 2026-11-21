@@ -11,14 +11,15 @@ import (
 
 // Collector holds the Prometheus metrics used by the SSH proxy server.
 type Collector struct {
-	registry             *prometheus.Registry
-	sshConnectionsTotal  prometheus.Counter
-	sshConnectionsActive prometheus.Gauge
-	sshHandshakeFailures prometheus.Counter
-	proxySessionsTotal   *prometheus.CounterVec
-	ssoConfirmations     *prometheus.CounterVec
-	ssoPendingSessions   prometheus.Gauge
-	ssoErrorsTotal       prometheus.Counter
+	registry              *prometheus.Registry
+	sshConnectionsTotal   prometheus.Counter
+	sshConnectionsActive  prometheus.Gauge
+	sshHandshakeFailures  prometheus.Counter
+	proxySessionsTotal    *prometheus.CounterVec
+	proxySessionsByTarget *prometheus.CounterVec
+	ssoConfirmations      *prometheus.CounterVec
+	ssoPendingSessions    prometheus.Gauge
+	ssoErrorsTotal        prometheus.Counter
 }
 
 var defaultCollector = NewCollector()
@@ -55,6 +56,11 @@ func NewCollector() *Collector {
 			Name:      "proxy_sessions_total",
 			Help:      "Total number of proxied shell or exec sessions by result.",
 		}, []string{"result"}),
+		proxySessionsByTarget: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "ssh_proxy",
+			Name:      "proxy_sessions_by_target_total",
+			Help:      "Total number of proxied sessions by result and target host:port.",
+		}, []string{"result", "target"}),
 		ssoConfirmations: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "ssh_proxy",
 			Name:      "sso_confirmations_total",
@@ -77,6 +83,7 @@ func NewCollector() *Collector {
 		collector.sshConnectionsActive,
 		collector.sshHandshakeFailures,
 		collector.proxySessionsTotal,
+		collector.proxySessionsByTarget,
 		collector.ssoConfirmations,
 		collector.ssoPendingSessions,
 		collector.ssoErrorsTotal,
@@ -124,6 +131,19 @@ func (c *Collector) RecordProxySession(result string) {
 		return
 	}
 	c.proxySessionsTotal.WithLabelValues(normalizeResult(result)).Inc()
+}
+
+// RecordProxySessionForTarget records a proxied session outcome including the
+// target label ("host:port"), enabling per-target alerting.
+func (c *Collector) RecordProxySessionForTarget(result, target string) {
+	if c == nil {
+		return
+	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		target = "unknown"
+	}
+	c.proxySessionsByTarget.WithLabelValues(normalizeResult(result), target).Inc()
 }
 
 // RecordSSOConfirmation records an SSO confirmation outcome.

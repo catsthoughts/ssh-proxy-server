@@ -1,5 +1,54 @@
 # SSH Proxy Server - Release Notes
 
+## Security Hardening (FR-1..FR-4 + Should/Could)
+
+### Must (production gate)
+
+1. **FR-1 Target ACL** (`internal/access`, `access_control` config section)
+   - Per-user rules `{"user": "name-or-glob", "targets": ["host[:port]", "web-*.prod", "*"]}`
+   - `default: allow|deny` for users without a matching rule
+   - Enforced both on `LC_SSH_SERVER` parsing and on every target connection attempt (covers static routing, failover retries, and SFTP)
+   - Denials are logged and audited as `target_denied`
+
+2. **FR-2 Structured JSON audit log** (`internal/audit`)
+   - One JSON object per line on stdout: `auth_success`, `auth_failure`, `target_denied`, `session_start`, `session_end` (result/exit_status/duration/recording_id), `sso_success`, `sso_failure`, `handshake_rate_limited`
+   - Designed for the journald → Loki → Alertmanager pipeline
+
+3. **FR-3 Hot reload** (`SIGHUP` + fsnotify via `internal/configwatch`)
+   - Config, ACL, trusted CA certs, log level, and rate limit are rebuilt for new connections
+   - Active sessions keep their snapshot and are not interrupted
+   - `authorized_keys` is re-read on every authentication (and watched for logging)
+
+4. **FR-4 Secret indirection** (`internal/secrets`)
+   - `sso.client_secret` supports `{"$env": "VAR"}`, `{"$file": "/path"}`, `"$env:VAR"`, `"$file:/path"`
+   - Secrets no longer need to be plaintext in the canonical git config
+
+### Should
+
+- **Recording retention & integrity**: `recordings.retention_days` cleanup (hourly janitor) + `recordings.integrity` SHA-256 `.sha256` sidecars
+- **Ed25519 host keys** for new installs; existing RSA keys still load
+- **Handshake rate limiting**: `rate_limit` — sliding window per source IP
+- **Centralized `known_hosts`**: `known_hosts` config path instead of `~/.ssh/known_hosts`
+- **Keycloak group check**: `sso.required_groups` validated against `groups` / `realm_access.roles` claims
+- **`/healthz`**: `health` config section, standalone HTTP endpoint
+
+### Could
+
+- **SFTP subsystem** (gated by `sftp_enabled`): raw binary piping to the target, not recorded
+- **Per-target metrics**: `ssh_proxy_proxy_sessions_by_target_total{result, target}`
+
+### Bug fixes (found during live e2e against a real target)
+
+1. **ACL was evaluated against the target user instead of the client user** (`internal/server/server.go`)
+   - `ACL.Allowed()` received `targetUser` at both enforcement points (`LC_SSH_SERVER` env handling and static routing), so FR-1 only worked when client and target usernames happened to match; a correctly configured rule still denied legitimate cross-user hops (e.g. client `alice` → target `bob@host`)
+   - Now evaluated against the authenticated client (`sessionUser`); the audit `target_denied` event also reports `user` (client) and `target_user` (target) separately
+
+2. **Clients hung after session end; agent channel and connection leaked** (`internal/server/server.go`, `internal/types`, `internal/client`)
+   - The accepted `auth-agent@openssh.com` channel was never closed by the proxy, so OpenSSH clients waited forever for the channel to close before exiting, and the client connection stayed open indefinitely
+   - The agent channel is now tracked in `SessionState` (`SetAgentChannel`/`TakeAgentChannel`) and closed when the session channel ends; the cached agent client is cleared so a subsequent session on the same connection re-opens it
+
+---
+
 ## Overview
 
 SSH proxy server with dynamic target routing via `LC_SSH_SERVER` or static routing through a fixed server list, SSH agent-based target authentication, optional Keycloak-backed SSO second factor, session recording, clean shutdown handling, terminal resize forwarding, and config-driven startup via `-config`. Interactive terminal sessions are enabled by default; direct commands require `allow_direct_commands` in the JSON config.

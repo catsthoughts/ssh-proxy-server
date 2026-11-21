@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"ssh-proxy-server/internal/access"
+	"ssh-proxy-server/internal/audit"
 	"ssh-proxy-server/internal/recording"
 
 	"golang.org/x/crypto/ssh"
@@ -12,7 +14,7 @@ import (
 )
 
 var (
-	logLevelMu     sync.RWMutex
+	logLevelMu      sync.RWMutex
 	currentLogLevel int
 )
 
@@ -84,8 +86,10 @@ type SessionState struct {
 	SSORequestTimeout     time.Duration
 	SSOEnforceUserMatch   bool
 	SSOInsecureSkipVerify bool
+	SSORequiredGroups     []string
 	SSOVerified           bool
 	AgentClient           agent.Agent
+	AgentChannel          ssh.Channel
 	TargetHost            string
 	TargetPort            string
 	TargetUser            string
@@ -94,10 +98,18 @@ type SessionState struct {
 	TargetSession         *ssh.Session
 	Recorder              recording.Recorder
 	RecordingsDir         string
+	RecordingIntegrity    bool
+	RecordingID           string
+	SessionID             string
+	SessionStart          time.Time
 	EnvVars               map[string]string // Environment variables sent by client
 	PtyTerm               string
 	PtyCols               int
 	PtyRows               int
+	KnownHosts            string
+	SFTPEnabled           bool
+	ACL                   *access.ACL
+	Audit                 *audit.Logger
 }
 
 func (s *SessionState) SetAgentRequested(value bool) {
@@ -152,6 +164,31 @@ func (s *SessionState) GetAgentClient() agent.Agent {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.AgentClient
+}
+
+// SetAgentChannel records the accepted auth-agent channel so it can be
+// closed when the session ends; otherwise the client waits forever for the
+// channel to close before exiting.
+func (s *SessionState) SetAgentChannel(channel ssh.Channel) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.AgentChannel = channel
+	s.mu.Unlock()
+}
+
+// TakeAgentChannel returns the agent channel and clears it, transferring
+// ownership (and the responsibility to Close it) to the caller.
+func (s *SessionState) TakeAgentChannel() ssh.Channel {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	channel := s.AgentChannel
+	s.AgentChannel = nil
+	return channel
 }
 
 func (s *SessionState) SetEnvVar(name, value string) {
@@ -362,4 +399,24 @@ func (s *SessionState) ClientConnValue() ssh.Conn {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.ClientConn
+}
+
+// SetRecordingID stores the audit recording identifier for this session.
+func (s *SessionState) SetRecordingID(id string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.RecordingID = id
+	s.mu.Unlock()
+}
+
+// RecordingIDValue returns the audit recording identifier for this session.
+func (s *SessionState) RecordingIDValue() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.RecordingID
 }
