@@ -4,13 +4,13 @@
 e2e-keys-init:
 	@mkdir -p e2e/e2e-keys
 
-# Start infrastructure only (ca + target + proxy) - no test-runner
+# Start infrastructure only (ca + target + proxy + proxy-acl) - no test-runner
 e2e-infra: e2e-keys-init
-	cd e2e && docker-compose up -d ca target proxy
+	cd e2e && docker-compose up -d ca target proxy proxy-acl
 
 # Rebuild proxy
 e2e-rebuild:
-	cd e2e && docker-compose build --no-cache proxy && docker-compose up -d --no-deps proxy
+	cd e2e && docker-compose build --no-cache proxy proxy-acl && docker-compose up -d --no-deps proxy proxy-acl
 
 # Run tests inside container (old way)
 e2e-test:

@@ -6,7 +6,9 @@ import (
 	"os"
 	"strings"
 
+	"ssh-proxy-server/internal/access"
 	"ssh-proxy-server/internal/recording"
+	"ssh-proxy-server/internal/secrets"
 	"ssh-proxy-server/internal/server"
 	"ssh-proxy-server/internal/sso"
 )
@@ -29,19 +31,39 @@ type MetricsConfig struct {
 	Path    string `json:"path"`
 }
 
+// RateLimitConfig controls the per-source-IP SSH handshake rate limiter.
+type RateLimitConfig struct {
+	Enabled      bool `json:"enabled"`
+	MaxPerMinute int  `json:"max_per_minute"`
+}
+
+// HealthConfig controls the lightweight HTTP /healthz endpoint.
+type HealthConfig struct {
+	Enabled bool   `json:"enabled"`
+	Listen  string `json:"listen"`
+	Path    string `json:"path"`
+}
+
+// RecordingsConfig controls recording retention and integrity protection.
+type RecordingsConfig struct {
+	RetentionDays int  `json:"retention_days"`
+	Integrity     bool `json:"integrity"`
+}
+
 type SSOConfig struct {
-	Enabled               bool   `json:"enabled"`
-	Provider              string `json:"provider"`
-	BaseURL               string `json:"base_url"`
-	Realm                 string `json:"realm"`
-	ClientID              string `json:"client_id"`
-	ClientSecret          string `json:"client_secret"`
-	Scope                 string `json:"scope"`
-	AuthTimeoutSeconds    int    `json:"auth_timeout_seconds"`
-	PollIntervalSeconds   int    `json:"poll_interval_seconds"`
-	ConnectTimeoutSeconds int    `json:"connect_timeout_seconds"`
-	EnforceSSHUserMatch   bool   `json:"enforce_ssh_user_match"`
-	InsecureSkipVerify    bool   `json:"insecure_skip_verify"`
+	Enabled               bool     `json:"enabled"`
+	Provider              string   `json:"provider"`
+	BaseURL               string   `json:"base_url"`
+	Realm                 string   `json:"realm"`
+	ClientID              string   `json:"client_id"`
+	ClientSecret          string   `json:"client_secret"`
+	Scope                 string   `json:"scope"`
+	AuthTimeoutSeconds    int      `json:"auth_timeout_seconds"`
+	PollIntervalSeconds   int      `json:"poll_interval_seconds"`
+	ConnectTimeoutSeconds int      `json:"connect_timeout_seconds"`
+	EnforceSSHUserMatch   bool     `json:"enforce_ssh_user_match"`
+	InsecureSkipVerify    bool     `json:"insecure_skip_verify"`
+	RequiredGroups        []string `json:"required_groups"`
 }
 
 // Config holds the startup configuration loaded from JSON.
@@ -62,6 +84,12 @@ type Config struct {
 	SSO                   SSOConfig           `json:"sso"`
 	TrustedCACerts        []string            `json:"trusted_ca_certs"`
 	TrustedHostCACerts    []string            `json:"trusted_host_ca_certs"`
+	AccessControl         access.Config       `json:"access_control"`
+	KnownHosts            string              `json:"known_hosts"`
+	SFTPEnabled           bool                `json:"sftp_enabled"`
+	RateLimit             RateLimitConfig     `json:"rate_limit"`
+	Health                HealthConfig        `json:"health"`
+	Recordings            RecordingsConfig    `json:"recordings"`
 }
 
 // Default returns the default application configuration.
@@ -100,6 +128,19 @@ func Default() Config {
 			ConnectTimeoutSeconds: sso.DefaultRequestTimeoutSeconds,
 			EnforceSSHUserMatch:   true,
 		},
+		AccessControl: access.Config{
+			Enabled: false,
+			Default: "deny",
+		},
+		RateLimit: RateLimitConfig{
+			Enabled:      false,
+			MaxPerMinute: 30,
+		},
+		Health: HealthConfig{
+			Enabled: false,
+			Listen:  "127.0.0.1:9091",
+			Path:    "/healthz",
+		},
 	}
 }
 
@@ -120,8 +161,13 @@ func Load(configPath string) (*Config, error) {
 	}
 
 	cfg := Default()
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	scrubbed := scrubSecretObjects(data, raw)
+	if err := json.Unmarshal(scrubbed, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config %s: %w", configPath, err)
+	}
+
+	if err := resolveSecretFields(&cfg, raw); err != nil {
+		return nil, fmt.Errorf("invalid config %s: %w", configPath, err)
 	}
 
 	cfg.RecordingFormat = recording.NormalizeFormat(cfg.RecordingFormat)
@@ -221,6 +267,28 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("static_routing.servers must contain at least one target when static routing is enabled")
 	}
 
+	if _, err := access.Compile(c.AccessControl); err != nil {
+		return err
+	}
+	c.AccessControl.Default = access.NormalizeDefault(c.AccessControl.Default)
+
+	if c.RateLimit.MaxPerMinute < 0 {
+		return fmt.Errorf("rate_limit.max_per_minute must be greater than or equal to 0")
+	}
+
+	if strings.TrimSpace(c.Health.Listen) == "" {
+		c.Health.Listen = "127.0.0.1:9091"
+	}
+	if strings.TrimSpace(c.Health.Path) == "" {
+		c.Health.Path = "/healthz"
+	} else if !strings.HasPrefix(c.Health.Path, "/") {
+		c.Health.Path = "/" + strings.TrimLeft(c.Health.Path, "/")
+	}
+
+	if c.Recordings.RetentionDays < 0 {
+		return fmt.Errorf("recordings.retention_days must be greater than or equal to 0")
+	}
+
 	return nil
 }
 
@@ -231,6 +299,67 @@ func (c *Config) applyLegacyRoutingFallbacks(raw map[string]json.RawMessage) {
 	if _, ok := raw["connect_timeout_seconds"]; !ok && c.StaticRouting.ConnectTimeoutSeconds > 0 {
 		c.ConnectTimeoutSeconds = c.StaticRouting.ConnectTimeoutSeconds
 	}
+}
+
+// scrubSecretObjects replaces object-form secret references (e.g.
+// {"$env": "..."}) with empty strings so the result can be unmarshalled into
+// the typed Config struct whose secret fields are plain strings. The original
+// raw map is used afterwards by resolveSecretFields to resolve the real value.
+func scrubSecretObjects(data []byte, raw map[string]json.RawMessage) []byte {
+	ssoRaw, ok := raw["sso"]
+	if !ok {
+		return data
+	}
+	var ssoFields map[string]json.RawMessage
+	if err := json.Unmarshal(ssoRaw, &ssoFields); err != nil {
+		return data
+	}
+	secretRaw, ok := ssoFields["client_secret"]
+	if !ok || len(secretRaw) == 0 || secretRaw[0] != '{' {
+		return data
+	}
+	ssoFields["client_secret"] = json.RawMessage(`""`)
+	fixed, err := json.Marshal(ssoFields)
+	if err != nil {
+		return data
+	}
+	rawCopy := make(map[string]json.RawMessage, len(raw))
+	for key, value := range raw {
+		rawCopy[key] = value
+	}
+	rawCopy["sso"] = fixed
+	scrubbed, err := json.Marshal(rawCopy)
+	if err != nil {
+		return data
+	}
+	return scrubbed
+}
+
+// resolveSecretFields applies $env/$file indirection to secret config fields
+// so secrets do not have to live as plaintext in the canonical config file.
+func resolveSecretFields(cfg *Config, raw map[string]json.RawMessage) error {
+	if len(raw) == 0 {
+		return nil
+	}
+
+	ssoRaw, ok := raw["sso"]
+	if !ok {
+		return nil
+	}
+	var ssoFields map[string]json.RawMessage
+	if err := json.Unmarshal(ssoRaw, &ssoFields); err != nil {
+		return fmt.Errorf("failed to parse sso section for secret resolution: %w", err)
+	}
+	secretRaw, ok := ssoFields["client_secret"]
+	if !ok {
+		return nil
+	}
+	resolved, _, err := secrets.ResolveJSON(secretRaw)
+	if err != nil {
+		return fmt.Errorf("failed to resolve sso.client_secret: %w", err)
+	}
+	cfg.SSO.ClientSecret = resolved
+	return nil
 }
 
 func envBool(name string, defaultValue bool) bool {

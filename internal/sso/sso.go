@@ -38,6 +38,7 @@ type Config struct {
 	RequestTimeout     time.Duration
 	EnforceUserMatch   bool
 	InsecureSkipVerify bool
+	RequiredGroups     []string
 }
 
 // Identity represents the user identity returned by the SSO provider.
@@ -45,6 +46,7 @@ type Identity struct {
 	Subject           string
 	PreferredUsername string
 	Email             string
+	Groups            []string
 }
 
 func (i Identity) BestIdentifier() string {
@@ -76,6 +78,31 @@ func (i Identity) MatchesSSHUser(user string) bool {
 		}
 	}
 	return false
+}
+
+// InGroup reports whether the identity belongs to the given group.
+func (i Identity) InGroup(group string) bool {
+	group = strings.ToLower(strings.TrimSpace(group))
+	if group == "" {
+		return true
+	}
+	for _, memberOf := range i.Groups {
+		if strings.ToLower(strings.TrimSpace(memberOf)) == group {
+			return true
+		}
+	}
+	return false
+}
+
+// MissingGroups returns the required groups the identity does not belong to.
+func (i Identity) MissingGroups(required []string) []string {
+	var missing []string
+	for _, group := range required {
+		if !i.InGroup(group) {
+			missing = append(missing, group)
+		}
+	}
+	return missing
 }
 
 type discoveryDocument struct {
@@ -394,7 +421,47 @@ func extractIdentityFromJWT(token string) Identity {
 		Subject:           firstStringClaim(claims, "sub"),
 		PreferredUsername: firstStringClaim(claims, "preferred_username", "username", "upn"),
 		Email:             firstStringClaim(claims, "email"),
+		Groups:            extractGroupClaims(claims),
 	}
+}
+
+// extractGroupClaims collects group memberships from the standard Keycloak
+// claims: the "groups" claim and realm roles under "realm_access.roles".
+func extractGroupClaims(claims map[string]interface{}) []string {
+	seen := make(map[string]struct{})
+	var groups []string
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		groups = append(groups, value)
+	}
+
+	if rawGroups, ok := claims["groups"].([]interface{}); ok {
+		for _, raw := range rawGroups {
+			if name, ok := raw.(string); ok {
+				add(name)
+			}
+		}
+	}
+
+	if realmAccess, ok := claims["realm_access"].(map[string]interface{}); ok {
+		if rawRoles, ok := realmAccess["roles"].([]interface{}); ok {
+			for _, raw := range rawRoles {
+				if name, ok := raw.(string); ok {
+					add(name)
+				}
+			}
+		}
+	}
+
+	return groups
 }
 
 func firstStringClaim(claims map[string]interface{}, keys ...string) string {

@@ -102,6 +102,9 @@ services:
       '
     networks:
       - ssh-proxy-net
+    depends_on:
+      ca:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "22"]
       interval: 1s
@@ -137,6 +140,38 @@ services:
       timeout: 5s
       retries: 30
 
+  # Second proxy instance used by the ACL e2e tests: dynamic routing
+  # (LC_SSH_SERVER) with access_control enabled, default deny. Exposed on
+  # host port 2223.
+  proxy-acl:
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile.proxy
+    container_name: ssh-proxy-acl
+    volumes:
+      - ./e2e-keys:/data:ro
+      - ./config-acl.json:/config/proxy-acl.json:ro
+      - ./recordings:/recordings
+      - ./ssh_host_key:/ssh_host_key:ro
+    environment:
+      - SSH_PROXY_LOG_LEVEL=debug
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["/ssh-proxy-server -config /config/proxy-acl.json"]
+    ports:
+      - "2223:2222"
+    networks:
+      - ssh-proxy-net
+    depends_on:
+      ca:
+        condition: service_healthy
+      target:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2222"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
   test-runner:
     build:
       context: ..
@@ -150,7 +185,11 @@ services:
     depends_on:
       proxy:
         condition: service_healthy
-    command: ["tail", "-f", "/dev/null"]
+    # Must match the Dockerfile.test CMD: `docker compose run --rm
+    # test-runner` (documented in E2E.md) executes this service command,
+    # not the image CMD — a placeholder like `tail -f /dev/null` would
+    # hang the run silently.
+    command: ["go", "test", "-v", "-count=1", "-timeout", "600s", "-tags", "e2econtainer", "."]
 
 networks:
   ssh-proxy-net:

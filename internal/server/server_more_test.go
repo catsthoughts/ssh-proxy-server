@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"ssh-proxy-server/internal/access"
 	appmetrics "ssh-proxy-server/internal/metrics"
 	"ssh-proxy-server/internal/sso"
 	"ssh-proxy-server/internal/types"
@@ -130,6 +131,147 @@ func TestHandleEnvRequestRejectsSuspiciousTargetAndLogs(t *testing.T) {
 	}
 	if got := logBuffer.String(); !strings.Contains(got, "Rejected suspicious LC_SSH_SERVER value") {
 		t.Fatalf("expected suspicious input to be logged, got %q", got)
+	}
+}
+
+func TestHandleEnvRequestDoesNotLogEnvValues(t *testing.T) {
+	types.SetLogLevel("debug")
+	defer types.SetLogLevel("info")
+
+	var logBuffer bytes.Buffer
+	originalWriter := log.Writer()
+	originalFlags := log.Flags()
+	log.SetOutput(&logBuffer)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(originalWriter)
+		log.SetFlags(originalFlags)
+	}()
+
+	const secretValue = "super-secret-client-token-12345"
+	state := &types.SessionState{ClientUser: "alice", EnvVars: make(map[string]string)}
+	req := &ssh.Request{
+		Type:      "env",
+		WantReply: false,
+		Payload:   encodeEnvPayload("LC_SSH_SERVER", "example.com:2222"),
+	}
+	handleEnvRequest(req, state)
+
+	tokenReq := &ssh.Request{
+		Type:      "env",
+		WantReply: false,
+		Payload:   encodeEnvPayload("API_TOKEN", secretValue),
+	}
+	handleEnvRequest(tokenReq, state)
+
+	if got := state.GetEnvVar("API_TOKEN"); got != secretValue {
+		t.Fatalf("GetEnvVar(API_TOKEN) = %q, want %q", got, secretValue)
+	}
+	if strings.Contains(logBuffer.String(), secretValue) {
+		t.Fatalf("env value leaked into debug log: %q", logBuffer.String())
+	}
+	if !strings.Contains(logBuffer.String(), "API_TOKEN") {
+		t.Fatalf("expected env variable name to be logged, got %q", logBuffer.String())
+	}
+}
+
+// Regression: the ACL decision must be made for the SSH login (client) user,
+// while an explicitly requested target user (cross-user hop, e.g. alice -> bob)
+// must be preserved and must not affect the ACL decision.
+func TestHandleEnvRequestAllowsCrossUserTargetWhenClientUserAllowed(t *testing.T) {
+	acl, err := access.Compile(access.Config{
+		Enabled: true,
+		Default: "deny",
+		Rules:   []access.Rule{{User: "alice", Targets: []string{"target-host:22"}}},
+	})
+	if err != nil {
+		t.Fatalf("access.Compile() returned error: %v", err)
+	}
+
+	state := &types.SessionState{ClientUser: "alice", EnvVars: make(map[string]string), ACL: acl}
+	req := &ssh.Request{
+		Type:      "env",
+		WantReply: false,
+		Payload:   encodeEnvPayload("LC_SSH_SERVER", "bob@target-host:22"),
+	}
+
+	handleEnvRequest(req, state)
+
+	user, host, port := state.Target()
+	if user != "bob" || host != "target-host" || port != "22" {
+		t.Fatalf("Target() = (%q, %q, %q), want (%q, %q, %q)", user, host, port, "bob", "target-host", "22")
+	}
+	if got := state.GetEnvVar("LC_SSH_SERVER"); got != "bob@target-host:22" {
+		t.Fatalf("GetEnvVar(LC_SSH_SERVER) = %q, want %q", got, "bob@target-host:22")
+	}
+}
+
+// TestHandleEnvRequestAllowsTargetViaSSOGroups: ACL rules keyed by SSO group
+// must apply to members of that group on the LC_SSH_SERVER path.
+func TestHandleEnvRequestAllowsTargetViaSSOGroups(t *testing.T) {
+	acl, err := access.Compile(access.Config{
+		Enabled: true,
+		Default: "deny",
+		Rules:   []access.Rule{{Groups: []string{"ssh-admins"}, Targets: []string{"target-host:22"}}},
+	})
+	if err != nil {
+		t.Fatalf("access.Compile() returned error: %v", err)
+	}
+
+	state := &types.SessionState{ClientUser: "alice", EnvVars: make(map[string]string), ACL: acl}
+	state.SetSSOGroups([]string{"ssh-admins"})
+	req := &ssh.Request{
+		Type:      "env",
+		WantReply: false,
+		Payload:   encodeEnvPayload("LC_SSH_SERVER", "testuser@target-host:22"),
+	}
+
+	handleEnvRequest(req, state)
+
+	user, host, port := state.Target()
+	if user != "testuser" || host != "target-host" || port != "22" {
+		t.Fatalf("Target() = (%q, %q, %q), want (%q, %q, %q)", user, host, port, "testuser", "target-host", "22")
+	}
+}
+
+// Regression: a client user with no matching ACL rule is denied even when the
+// requested target user would be allowed for someone else (client-vs-target
+// user confusion).
+func TestHandleEnvRequestDeniesWhenClientUserNotAllowed(t *testing.T) {
+	acl, err := access.Compile(access.Config{
+		Enabled: true,
+		Default: "deny",
+		Rules:   []access.Rule{{User: "bob", Targets: []string{"target-host:22"}}},
+	})
+	if err != nil {
+		t.Fatalf("access.Compile() returned error: %v", err)
+	}
+
+	state := &types.SessionState{ClientUser: "alice", EnvVars: make(map[string]string), ACL: acl}
+	req := &ssh.Request{
+		Type:      "env",
+		WantReply: false,
+		Payload:   encodeEnvPayload("LC_SSH_SERVER", "testuser@target-host:22"),
+	}
+
+	handleEnvRequest(req, state)
+
+	if got := state.GetEnvVar("LC_SSH_SERVER"); got != "" {
+		t.Fatalf("expected LC_SSH_SERVER to be rejected, got %q", got)
+	}
+	user, host, port := state.Target()
+	if user != "" || host != "" || port != "" {
+		t.Fatalf("expected target fields to remain empty, got (%q, %q, %q)", user, host, port)
+	}
+}
+
+func TestResolveTargetAddressKeepsExplicitTargetUser(t *testing.T) {
+	user, host, port, err := resolveTargetAddress("bob@target.example.com:22", "alice")
+	if err != nil {
+		t.Fatalf("resolveTargetAddress() returned error: %v", err)
+	}
+	if user != "bob" || host != "target.example.com" || port != "22" {
+		t.Fatalf("resolveTargetAddress() = (%q, %q, %q), want (%q, %q, %q)", user, host, port, "bob", "target.example.com", "22")
 	}
 }
 
@@ -284,6 +426,64 @@ func TestEnsureSSOAuthenticationAllowsMismatchedIdentityWhenDisabled(t *testing.
 	}
 	if !state.IsSSOVerified() {
 		t.Fatal("expected SSOVerified to be true when identity binding is disabled")
+	}
+}
+
+func TestEnsureSSOAuthenticationRecordsResultAndGroups(t *testing.T) {
+	original := runSSODeviceAuth
+	defer func() { runSSODeviceAuth = original }()
+
+	runSSODeviceAuth = func(ctx context.Context, cfg sso.Config, output io.Writer) (sso.Identity, error) {
+		return sso.Identity{PreferredUsername: "alice", Groups: []string{"ssh-users", "admins"}}, nil
+	}
+
+	channel := &stubSSHChannel{}
+	state := &types.SessionState{
+		ClientUser:      "alice",
+		SSOEnabled:      true,
+		SSOProvider:     "keycloak",
+		SSORealm:        "ssh-proxy-server",
+		SSOClientID:     "ssh-proxy-server-cli",
+		SSOAuthTimeout:  45 * time.Second,
+		SSOPollInterval: 3 * time.Second,
+	}
+
+	if err := ensureSSOAuthentication(channel, state); err != nil {
+		t.Fatalf("ensureSSOAuthentication() returned error: %v", err)
+	}
+	if got := state.SSOResultValue(); got != "success" {
+		t.Fatalf("SSOResultValue() = %q, want %q", got, "success")
+	}
+	groups := state.SSOGroupsValue()
+	if len(groups) != 2 || groups[0] != "ssh-users" || groups[1] != "admins" {
+		t.Fatalf("SSOGroupsValue() = %v, want [ssh-users admins]", groups)
+	}
+}
+
+func TestEnsureSSOAuthenticationRecordsFailureResult(t *testing.T) {
+	original := runSSODeviceAuth
+	defer func() { runSSODeviceAuth = original }()
+
+	runSSODeviceAuth = func(ctx context.Context, cfg sso.Config, output io.Writer) (sso.Identity, error) {
+		return sso.Identity{}, context.DeadlineExceeded
+	}
+
+	channel := &stubSSHChannel{}
+	state := &types.SessionState{
+		ClientUser:      "alice",
+		SSOEnabled:      true,
+		SSOProvider:     "keycloak",
+		SSORealm:        "ssh-proxy-server",
+		SSOClientID:     "ssh-proxy-server-cli",
+		SSOAuthTimeout:  5 * time.Second,
+		SSOPollInterval: time.Second,
+	}
+
+	if err := ensureSSOAuthentication(channel, state); err == nil {
+		t.Fatal("expected ensureSSOAuthentication() to return an error when SSO fails")
+	}
+	if got := state.SSOResultValue(); got != "failure" {
+		t.Fatalf("SSOResultValue() = %q, want %q", got, "failure")
 	}
 }
 

@@ -1,3 +1,5 @@
+//go:build !e2econtainer
+
 package tests
 
 import (
@@ -12,9 +14,9 @@ import (
 )
 
 const (
-	proxyAddrHost  = "localhost:2222"
-	caDirHost      = "./e2e-keys"
-	testUser       = "testuser"
+	proxyAddrHost = "localhost:2222"
+	caDirHost     = "./e2e-keys"
+	testUser      = "testuser"
 )
 
 func waitForPortHost(addr string, timeout time.Duration) error {
@@ -52,7 +54,7 @@ func TestClientCertificateAuthHost(t *testing.T) {
 			ssh.PublicKeys(signers...),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout: 15 * time.Second,
+		Timeout:         15 * time.Second,
 	}
 
 	client, err := ssh.Dial("tcp", proxyAddrHost, config)
@@ -86,7 +88,7 @@ func TestClientKeyAuthWithoutCertificateHost(t *testing.T) {
 			ssh.PublicKeys(signers...),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout: 15 * time.Second,
+		Timeout:         15 * time.Second,
 	}
 
 	client, err := ssh.Dial("tcp", proxyAddrHost, config)
@@ -122,7 +124,7 @@ func TestHostCertificateVerificationHost(t *testing.T) {
 			ssh.PublicKeys(signers...),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout: 15 * time.Second,
+		Timeout:         15 * time.Second,
 	}
 
 	client, err := ssh.Dial("tcp", proxyAddrHost, config)
@@ -160,7 +162,7 @@ func TestExpiredCertificateRejectedHost(t *testing.T) {
 			ssh.PublicKeys(signers...),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout: 15 * time.Second,
+		Timeout:         15 * time.Second,
 	}
 
 	client, err := ssh.Dial("tcp", proxyAddrHost, config)
@@ -191,7 +193,7 @@ func TestECDSAKeyAuthHost(t *testing.T) {
 			ssh.PublicKeys(signers...),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout: 15 * time.Second,
+		Timeout:         15 * time.Second,
 	}
 
 	client, err := ssh.Dial("tcp", proxyAddrHost, config)

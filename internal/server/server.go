@@ -12,12 +12,16 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode"
 
+	"ssh-proxy-server/internal/access"
+	auditpkg "ssh-proxy-server/internal/audit"
 	proxyclient "ssh-proxy-server/internal/client"
 	appmetrics "ssh-proxy-server/internal/metrics"
+	"ssh-proxy-server/internal/ratelimit"
 	"ssh-proxy-server/internal/recording"
 	"ssh-proxy-server/internal/sso"
 	"ssh-proxy-server/internal/types"
@@ -57,6 +61,30 @@ type SSOConfig struct {
 	RequestTimeout     time.Duration
 	EnforceUserMatch   bool
 	InsecureSkipVerify bool
+	RequiredGroups     []string
+}
+
+// ConnectionConfig carries the per-connection settings snapshot. A fresh
+// snapshot is captured for every inbound connection, so hot reloads (SIGHUP /
+// fsnotify) apply to new connections without breaking active sessions.
+type ConnectionConfig struct {
+	RecordingsDir           string
+	AuthorizedKeys          string
+	AutoAcceptClientKeys    bool
+	AllowDirectCommands     bool
+	InsecureIgnoreHostKey   bool
+	RecordingFormat         string
+	Routing                 RoutingConfig
+	SSO                     SSOConfig
+	TrustedCACerts          []ssh.PublicKey
+	TrustedHostCACerts      []ssh.PublicKey
+	ACL                     *access.ACL
+	Audit                   *auditpkg.Logger
+	Limiter                 *ratelimit.Limiter
+	KnownHosts              string
+	SFTPEnabled             bool
+	RecordingIntegrity      bool
+	RecordingsRetentionDays int
 }
 
 func NormalizeRoutingMode(mode string) string {
@@ -84,21 +112,58 @@ func ValidateTargetAddress(target string) error {
 	return err
 }
 
-func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir, authorizedKeysPath string, autoAcceptClientKeys, allowDirectCommands, insecureIgnoreHostKey bool, recordingFormat string, routingConfig RoutingConfig, ssoConfig SSOConfig, trustedCACerts, trustedHostCACerts []ssh.PublicKey) {
-
+func HandleConnection(conn net.Conn, hostKey ssh.Signer, cfg ConnectionConfig) {
 	defer conn.Close()
 
+	audit := cfg.Audit
+	if cfg.Limiter != nil && !cfg.Limiter.Allow(conn.RemoteAddr().String()) {
+		appmetrics.Default().RecordSSHHandshakeFailure()
+		if audit != nil {
+			audit.Log(auditpkg.Event{
+				Event:      "handshake_rate_limited",
+				ClientAddr: conn.RemoteAddr().String(),
+				Result:     "denied",
+				Reason:     "too many SSH handshakes from this source IP",
+			})
+		}
+		log.Printf("Rejected connection from %s: handshake rate limit exceeded", conn.RemoteAddr())
+		return
+	}
+
 	var clientKey ssh.PublicKey
+	sessionID := uuid.New().String()
+	clientAddr := conn.RemoteAddr().String()
 
 	config := &ssh.ServerConfig{
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			if err := isAuthorizedClientKeyWithCA(key, authorizedKeysPath, trustedCACerts, autoAcceptClientKeys); err != nil {
+			if err := isAuthorizedClientKeyWithCA(key, cfg.AuthorizedKeys, cfg.TrustedCACerts, cfg.AutoAcceptClientKeys); err != nil {
 				types.LogInfo("Rejected public key for %s from %s: %v", conn.User(), conn.RemoteAddr(), err)
+				if audit != nil {
+					audit.Log(auditpkg.Event{
+						Event:      "auth_failure",
+						SessionID:  sessionID,
+						User:       conn.User(),
+						ClientAddr: clientAddr,
+						Key:        ssh.FingerprintSHA256(key),
+						Result:     "denied",
+						Reason:     err.Error(),
+					})
+				}
 				return nil, err
 			}
 
 			clientKey = key
 			types.LogDebug("Accepted auth for %s with key %s (%s)", conn.User(), key.Type(), ssh.FingerprintSHA256(key))
+			if audit != nil {
+				audit.Log(auditpkg.Event{
+					Event:      "auth_success",
+					SessionID:  sessionID,
+					User:       conn.User(),
+					ClientAddr: clientAddr,
+					Key:        ssh.FingerprintSHA256(key),
+					Result:     "success",
+				})
+			}
 			return &ssh.Permissions{}, nil
 		},
 		NoClientAuth: false,
@@ -123,32 +188,42 @@ func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir, authoriz
 		ClientUser:            sshConn.User(),
 		ClientKey:             clientKey,
 		ClientConn:            sshConn,
-		AllowDirectCommands:   allowDirectCommands,
-		InsecureIgnoreHostKey: insecureIgnoreHostKey,
-		RecordingFormat:       recording.NormalizeFormat(recordingFormat),
-		StaticRoutingEnabled:  routingConfig.StaticEnabled,
-		StaticTargets:         append([]string(nil), routingConfig.StaticTargets...),
-		StaticRoutingMode:     NormalizeRoutingMode(routingConfig.Mode),
-		ConnectTimeout:        routingConfig.ConnectTimeout,
-		ConnectRetries:        routingConfig.Retries,
-		SSOEnabled:            ssoConfig.Enabled,
-		SSOProvider:           sso.NormalizeProvider(ssoConfig.Provider),
-		SSOBaseURL:            strings.TrimSpace(ssoConfig.BaseURL),
-		SSORealm:              strings.TrimSpace(ssoConfig.Realm),
-		SSOClientID:           strings.TrimSpace(ssoConfig.ClientID),
-		SSOClientSecret:       strings.TrimSpace(ssoConfig.ClientSecret),
-		SSOScope:              strings.TrimSpace(ssoConfig.Scope),
-		SSOAuthTimeout:        ssoConfig.AuthTimeout,
-		SSOPollInterval:       ssoConfig.PollInterval,
-		SSORequestTimeout:     ssoConfig.RequestTimeout,
-		SSOEnforceUserMatch:   ssoConfig.EnforceUserMatch,
-		SSOInsecureSkipVerify: ssoConfig.InsecureSkipVerify,
-		RecordingsDir:         recordingsDir,
+		AllowDirectCommands:   cfg.AllowDirectCommands,
+		InsecureIgnoreHostKey: cfg.InsecureIgnoreHostKey,
+		RecordingFormat:       recording.NormalizeFormat(cfg.RecordingFormat),
+		StaticRoutingEnabled:  cfg.Routing.StaticEnabled,
+		StaticTargets:         append([]string(nil), cfg.Routing.StaticTargets...),
+		StaticRoutingMode:     NormalizeRoutingMode(cfg.Routing.Mode),
+		ConnectTimeout:        cfg.Routing.ConnectTimeout,
+		ConnectRetries:        cfg.Routing.Retries,
+		SSOEnabled:            cfg.SSO.Enabled,
+		SSOProvider:           sso.NormalizeProvider(cfg.SSO.Provider),
+		SSOBaseURL:            strings.TrimSpace(cfg.SSO.BaseURL),
+		SSORealm:              strings.TrimSpace(cfg.SSO.Realm),
+		SSOClientID:           strings.TrimSpace(cfg.SSO.ClientID),
+		SSOClientSecret:       strings.TrimSpace(cfg.SSO.ClientSecret),
+		SSOScope:              strings.TrimSpace(cfg.SSO.Scope),
+		SSOAuthTimeout:        cfg.SSO.AuthTimeout,
+		SSOPollInterval:       cfg.SSO.PollInterval,
+		SSORequestTimeout:     cfg.SSO.RequestTimeout,
+		SSOEnforceUserMatch:   cfg.SSO.EnforceUserMatch,
+		SSOInsecureSkipVerify: cfg.SSO.InsecureSkipVerify,
+		SSORequiredGroups:     append([]string(nil), cfg.SSO.RequiredGroups...),
+		RecordingsDir:         cfg.RecordingsDir,
+		RecordingIntegrity:    cfg.RecordingIntegrity,
+		SessionID:             sessionID,
 		EnvVars:               make(map[string]string),
-		TrustedHostCASerts:    trustedHostCACerts,
+		TrustedHostCASerts:    cfg.TrustedHostCACerts,
+		KnownHosts:            strings.TrimSpace(cfg.KnownHosts),
+		SFTPEnabled:           cfg.SFTPEnabled,
+		ACL:                   cfg.ACL,
+		Audit:                 audit,
 	}
 	if state.ConnectTimeout <= 0 {
 		state.ConnectTimeout = time.Duration(DefaultConnectTimeoutSeconds) * time.Second
+	}
+	if !cfg.SSO.Enabled {
+		state.SSOResult = "not_required"
 	}
 	if state.ConnectRetries < 0 {
 		state.ConnectRetries = 0
@@ -191,6 +266,7 @@ func HandleConnection(conn net.Conn, hostKey ssh.Signer, recordingsDir, authoriz
 			go ssh.DiscardRequests(agentRequests)
 			agentClient := agent.NewClient(channel)
 			state.SetAgentClient(agentClient)
+			state.SetAgentChannel(channel)
 			continue
 		}
 
@@ -228,6 +304,12 @@ func handleGlobalRequests(requests <-chan *ssh.Request, state *types.SessionStat
 
 func handleChannel(channel ssh.Channel, requests <-chan *ssh.Request, state *types.SessionState) {
 	defer channel.Close()
+	defer func() {
+		if agentChan := state.TakeAgentChannel(); agentChan != nil {
+			_ = agentChan.Close()
+			state.SetAgentClient(nil)
+		}
+	}()
 
 	var command string
 	var cols, rows int
@@ -303,6 +385,22 @@ func handleChannel(channel ssh.Channel, requests <-chan *ssh.Request, state *typ
 			}
 
 		case "subsystem":
+			subsystem := parseSubsystemRequest(req.Payload)
+			if subsystem == "sftp" && state.SFTPEnabled {
+				if sessionStarted {
+					req.Reply(false, nil)
+					continue
+				}
+				sessionStarted = true
+				sessionDone = make(chan struct{})
+				req.Reply(true, nil)
+				go func() {
+					defer close(sessionDone)
+					handleSFTPProxy(channel, state)
+				}()
+				continue
+			}
+			types.LogDebug("Rejected unsupported subsystem request %q", subsystem)
 			req.Reply(false, nil)
 
 		default:
@@ -319,7 +417,8 @@ func handleChannel(channel ssh.Channel, requests <-chan *ssh.Request, state *typ
 
 func handleShellProxy(channel ssh.Channel, state *types.SessionState) {
 	if err := ensureSSOAuthentication(channel, state); err != nil {
-		appmetrics.Default().RecordProxySession("failure")
+		recordSessionResult(state, "failure")
+		auditSessionEnd(state, "failure", 1, err)
 		types.LogInfo("Session rejected during SSO confirmation: client=%s err=%v", state.ClientUserValue(), err)
 		fmt.Fprintf(channel, "Error: %v\n", err)
 		sendExitStatus(channel, 1)
@@ -327,19 +426,21 @@ func handleShellProxy(channel ssh.Channel, state *types.SessionState) {
 		return
 	}
 	if err := proxySession(channel, state, "", ""); err != nil {
-		appmetrics.Default().RecordProxySession("failure")
+		recordSessionResult(state, "failure")
+		auditSessionEnd(state, "failure", 1, err)
 		types.LogInfo("Shell proxy failed: client=%s err=%v", state.ClientUserValue(), err)
 		fmt.Fprintf(channel, "Error: %v\n", err)
 		channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Code uint32 }{1}))
 		closeClientSession(channel, state)
 		return
 	}
-	appmetrics.Default().RecordProxySession("success")
+	recordSessionResult(state, "success")
 }
 
 func handleExecProxy(channel ssh.Channel, state *types.SessionState, command string) {
 	if !state.AllowDirectCommands {
-		appmetrics.Default().RecordProxySession("rejected")
+		recordSessionResult(state, "rejected")
+		auditSessionEnd(state, "denied", 1, fmt.Errorf("direct command execution is disabled"))
 		types.LogInfo("Rejected direct command for client=%s: direct command execution is disabled", state.ClientUserValue())
 		fmt.Fprintf(channel, "Error: direct commands are disabled; set allow_direct_commands=true in the proxy config to enable them\n")
 		sendExitStatus(channel, 1)
@@ -348,7 +449,8 @@ func handleExecProxy(channel ssh.Channel, state *types.SessionState, command str
 	}
 
 	if err := ensureSSOAuthentication(channel, state); err != nil {
-		appmetrics.Default().RecordProxySession("failure")
+		recordSessionResult(state, "failure")
+		auditSessionEnd(state, "failure", 1, err)
 		types.LogInfo("Direct command rejected during SSO confirmation: client=%s err=%v", state.ClientUserValue(), err)
 		fmt.Fprintf(channel, "Error: %v\n", err)
 		sendExitStatus(channel, 1)
@@ -357,14 +459,15 @@ func handleExecProxy(channel ssh.Channel, state *types.SessionState, command str
 	}
 
 	if err := proxySession(channel, state, "", command); err != nil {
-		appmetrics.Default().RecordProxySession("failure")
+		recordSessionResult(state, "failure")
+		auditSessionEnd(state, "failure", 1, err)
 		types.LogInfo("Direct command proxy failed: client=%s err=%v", state.ClientUserValue(), err)
 		fmt.Fprintf(channel, "Error: %v\n", err)
 		channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Code uint32 }{1}))
 		closeClientSession(channel, state)
 		return
 	}
-	appmetrics.Default().RecordProxySession("success")
+	recordSessionResult(state, "success")
 }
 
 func ensureSSOAuthentication(channel ssh.Channel, state *types.SessionState) error {
@@ -400,6 +503,13 @@ func ensureSSOAuthentication(channel ssh.Channel, state *types.SessionState) err
 		metrics.RecordSSOConfirmation("failure")
 		metrics.RecordSSOError()
 		types.LogInfo("SSO confirmation failed: client=%s provider=%s realm=%s err=%v", clientUser, cfg.Provider, cfg.Realm, err)
+		state.SetSSOResult("failure")
+		auditEvent(state, auditpkg.Event{
+			Event:  "sso_failure",
+			User:   clientUser,
+			Result: "failure",
+			Reason: err.Error(),
+		})
 		return err
 	}
 	if state.SSOEnforceUserMatch {
@@ -408,15 +518,38 @@ func ensureSSOAuthentication(channel ssh.Channel, state *types.SessionState) err
 			metrics.RecordSSOError()
 			identifier := identity.BestIdentifier()
 			if identifier == "" {
-				return fmt.Errorf("SSO confirmation succeeded but did not provide an identity that can be matched to SSH user %q", clientUser)
+				err := fmt.Errorf("SSO confirmation succeeded but did not provide an identity that can be matched to SSH user %q", clientUser)
+				state.SetSSOResult("failure")
+				auditEvent(state, auditpkg.Event{Event: "sso_failure", User: clientUser, Result: "failure", Reason: err.Error()})
+				return err
 			}
-			return fmt.Errorf("SSO identity %q does not match SSH user %q", identifier, clientUser)
+			err := fmt.Errorf("SSO identity %q does not match SSH user %q", identifier, clientUser)
+			state.SetSSOResult("failure")
+			auditEvent(state, auditpkg.Event{Event: "sso_failure", User: clientUser, Result: "failure", Reason: err.Error()})
+			return err
 		}
 		types.LogInfo("SSO identity matched SSH user: client=%s identity=%s", clientUser, identity.BestIdentifier())
 	}
+	if missing := identity.MissingGroups(state.SSORequiredGroups); len(missing) > 0 {
+		metrics.RecordSSOConfirmation("failure")
+		metrics.RecordSSOError()
+		err := fmt.Errorf("SSO identity %q is missing required group(s): %s", identity.BestIdentifier(), strings.Join(missing, ", "))
+		types.LogInfo("SSO group check failed: client=%s err=%v", clientUser, err)
+		state.SetSSOResult("failure")
+		auditEvent(state, auditpkg.Event{Event: "sso_failure", User: clientUser, Result: "denied", Reason: err.Error()})
+		return err
+	}
 	state.SetSSOVerified(true)
+	state.SetSSOResult("success")
+	state.SetSSOGroups(identity.Groups)
 	metrics.RecordSSOConfirmation("success")
 	types.LogInfo("SSO confirmation successful: client=%s provider=%s realm=%s", clientUser, cfg.Provider, cfg.Realm)
+	auditEvent(state, auditpkg.Event{
+		Event:  "sso_success",
+		User:   clientUser,
+		Result: "success",
+		Reason: identity.BestIdentifier(),
+	})
 	return nil
 }
 
@@ -446,7 +579,7 @@ func handleEnvRequest(req *ssh.Request, state *types.SessionState) {
 
 	if varName == "LC_SSH_SERVER" {
 		if state != nil && state.StaticRoutingEnabled {
-			types.LogDebug("Ignoring LC_SSH_SERVER=%q because static routing is enabled", varValue)
+			types.LogDebug("Ignoring LC_SSH_SERVER because static routing is enabled")
 			req.Reply(true, nil)
 			return
 		}
@@ -466,8 +599,25 @@ func handleEnvRequest(req *ssh.Request, state *types.SessionState) {
 			return
 		}
 
+		if state != nil && state.ACL != nil && !state.ACL.Allowed(sessionUser, targetHost, targetPort, state.SSOGroupsValue()...) {
+			types.LogInfo("Denied target %s for client=%s by access control list", formatTargetAddress(targetUser, targetHost, targetPort), sessionUser)
+			auditEvent(state, auditpkg.Event{
+				Event:      "target_denied",
+				User:       sessionUser,
+				TargetUser: targetUser,
+				TargetHost: targetHost,
+				TargetPort: targetPort,
+				Result:     "denied",
+				Reason:     "target is not allowed for this user by access_control",
+			})
+			req.Reply(false, nil)
+			return
+		}
+
 		state.SetEnvVar(varName, varValue)
-		types.LogDebug("Received environment variable: %s=%s", varName, varValue)
+		// Never log environment variable values: SendEnv variables may carry
+		// client tokens (API keys, JWTs) that must not leak into journald/Loki.
+		types.LogDebug("Received environment variable: %s=<redacted>", varName)
 		state.SetTarget(targetUser, targetHost, targetPort)
 		types.LogInfo("Target parsed from LC_SSH_SERVER: user=%s host=%s port=%s", targetUser, targetHost, targetPort)
 		req.Reply(true, nil)
@@ -475,7 +625,9 @@ func handleEnvRequest(req *ssh.Request, state *types.SessionState) {
 	}
 
 	state.SetEnvVar(varName, varValue)
-	types.LogDebug("Received environment variable: %s=%s", varName, varValue)
+	// Never log environment variable values: SendEnv variables may carry
+	// client tokens (API keys, JWTs) that must not leak into journald/Loki.
+	types.LogDebug("Received environment variable: %s=<redacted>", varName)
 	req.Reply(true, nil)
 }
 
@@ -507,6 +659,7 @@ func proxySession(channel ssh.Channel, state *types.SessionState, targetAddr, co
 	}()
 
 	recordingID := generateRecordingID()
+	state.SetRecordingID(recordingID)
 	recordingFormat := recording.NormalizeFormat(state.RecordingFormat)
 	recordingFileName := buildRecordingFileName(targetUser, targetHost, targetPort, recordingID, recordingFormat)
 	recordingsDir := state.RecordingsDir
@@ -528,8 +681,16 @@ func proxySession(channel ssh.Channel, state *types.SessionState, targetAddr, co
 	state.SetRecorder(recorder)
 	defer func() {
 		state.SetRecorder(nil)
-		_ = recorder.Close()
+		if err := recorder.Close(); err != nil {
+			types.LogDebug("Failed to close recording %s: %v", recordingPath, err)
+		}
+		if state.RecordingIntegrity {
+			if err := recording.WriteChecksum(recordingPath); err != nil {
+				types.LogInfo("Failed to write recording checksum for %s: %v", recordingPath, err)
+			}
+		}
 	}()
+	state.SessionStart = time.Now()
 
 	stdinPipe, err := targetSession.StdinPipe()
 	if err != nil {
@@ -568,6 +729,17 @@ func proxySession(channel ssh.Channel, state *types.SessionState, targetAddr, co
 	go copySessionOutput(channel.Stderr(), stderrPipe, state, "stderr")
 
 	types.LogInfo("Proxy session started: client=%s target=%s", state.ClientUserValue(), formatTargetAddress(targetUser, targetHost, targetPort))
+	auditEvent(state, auditpkg.Event{
+		Event:       "session_start",
+		User:        state.ClientUserValue(),
+		Key:         clientKeyFingerprint(state),
+		TargetUser:  targetUser,
+		TargetHost:  targetHost,
+		TargetPort:  targetPort,
+		SSOResult:   state.SSOResultValue(),
+		RecordingID: recordingID,
+		Result:      "success",
+	})
 
 	if command == "" {
 		if err := targetSession.Shell(); err != nil {
@@ -651,6 +823,20 @@ func connectToFirstAvailableTarget(state *types.SessionState, targets []string) 
 				continue
 			}
 			if state != nil {
+				if state.ACL != nil && !state.ACL.Allowed(sessionUser, targetHost, targetPort, state.SSOGroupsValue()...) {
+					types.LogInfo("Denied target %s for client=%s by access control list", formatTargetAddress(targetUser, targetHost, targetPort), sessionUser)
+					auditEvent(state, auditpkg.Event{
+						Event:      "target_denied",
+						User:       sessionUser,
+						TargetUser: targetUser,
+						TargetHost: targetHost,
+						TargetPort: targetPort,
+						Result:     "denied",
+						Reason:     "target is not allowed for this user by access_control",
+					})
+					failures = append(failures, fmt.Sprintf("%s: access denied by access_control", formatTargetAddress(targetUser, targetHost, targetPort)))
+					continue
+				}
 				state.SetTarget(targetUser, targetHost, targetPort)
 			}
 
@@ -828,6 +1014,19 @@ func finalizeRemoteSession(channel ssh.Channel, state *types.SessionState, err e
 
 	if err == nil {
 		types.LogInfo("Session ended: client=%s target=%s exit_status=0", state.ClientUserValue(), target)
+		auditEvent(state, auditpkg.Event{
+			Event:       "session_end",
+			User:        state.ClientUserValue(),
+			Key:         clientKeyFingerprint(state),
+			TargetUser:  targetUser,
+			TargetHost:  targetHost,
+			TargetPort:  targetPort,
+			SSOResult:   state.SSOResultValue(),
+			RecordingID: state.RecordingIDValue(),
+			Result:      "success",
+			ExitStatus:  auditpkg.Int(0),
+			DurationSec: sessionDuration(state),
+		})
 		sendExitStatus(channel, 0)
 		closeClientSession(channel, state)
 		return nil
@@ -837,12 +1036,39 @@ func finalizeRemoteSession(channel ssh.Channel, state *types.SessionState, err e
 	if errors.As(err, &exitErr) {
 		status := uint32(exitErr.ExitStatus())
 		types.LogInfo("Session ended: client=%s target=%s exit_status=%d", state.ClientUserValue(), target, status)
+		auditEvent(state, auditpkg.Event{
+			Event:       "session_end",
+			User:        state.ClientUserValue(),
+			Key:         clientKeyFingerprint(state),
+			TargetUser:  targetUser,
+			TargetHost:  targetHost,
+			TargetPort:  targetPort,
+			SSOResult:   state.SSOResultValue(),
+			RecordingID: state.RecordingIDValue(),
+			Result:      "success",
+			ExitStatus:  auditpkg.Int(exitErr.ExitStatus()),
+			DurationSec: sessionDuration(state),
+		})
 		sendExitStatus(channel, status)
 		closeClientSession(channel, state)
 		return nil
 	}
 
 	types.LogInfo("Session ended with error: client=%s target=%s err=%v", state.ClientUserValue(), target, err)
+	auditEvent(state, auditpkg.Event{
+		Event:       "session_end",
+		User:        state.ClientUserValue(),
+		Key:         clientKeyFingerprint(state),
+		TargetUser:  targetUser,
+		TargetHost:  targetHost,
+		TargetPort:  targetPort,
+		SSOResult:   state.SSOResultValue(),
+		RecordingID: state.RecordingIDValue(),
+		Result:      "failure",
+		ExitStatus:  auditpkg.Int(1),
+		DurationSec: sessionDuration(state),
+		Reason:      err.Error(),
+	})
 	sendExitStatus(channel, 1)
 	closeClientSession(channel, state)
 	return err
@@ -934,6 +1160,197 @@ func parseWindowChange(payload []byte, cols, rows *int) {
 		*cols = int(binary.BigEndian.Uint32(payload[:4]))
 		*rows = int(binary.BigEndian.Uint32(payload[4:8]))
 	}
+}
+
+// parseSubsystemRequest extracts the subsystem name from an SSH subsystem
+// request payload (uint32 length-prefixed string).
+func parseSubsystemRequest(payload []byte) string {
+	if len(payload) < 4 {
+		return ""
+	}
+	nameLen := int(binary.BigEndian.Uint32(payload[:4]))
+	if nameLen < 0 || len(payload) < 4+nameLen {
+		return ""
+	}
+	return string(payload[4 : 4+nameLen])
+}
+
+// handleSFTPProxy proxies an SFTP subsystem session to the target. The SFTP
+// binary protocol stream is piped without terminal recording.
+func handleSFTPProxy(channel ssh.Channel, state *types.SessionState) {
+	fail := func(err error) {
+		recordSessionResult(state, "failure")
+		auditSessionEnd(state, "failure", 1, err)
+		types.LogInfo("SFTP proxy failed: client=%s err=%v", state.ClientUserValue(), err)
+		fmt.Fprintf(channel, "Error: %v\n", err)
+		sendExitStatus(channel, 1)
+		closeClientSession(channel, state)
+	}
+
+	if err := ensureSSOAuthentication(channel, state); err != nil {
+		fail(err)
+		return
+	}
+
+	targets, err := resolveTargetCandidates(state, "", "")
+	if err != nil {
+		fail(err)
+		return
+	}
+	targetClient, targetUser, targetHost, targetPort, err := connectToFirstAvailableTarget(state, targets)
+	if err != nil {
+		fail(err)
+		return
+	}
+	defer targetClient.Close()
+	state.SetTargetClient(targetClient)
+	state.SetTarget(targetUser, targetHost, targetPort)
+	defer func() {
+		state.SetTargetClient(nil)
+	}()
+
+	targetSession, err := targetClient.NewSession()
+	if err != nil {
+		fail(fmt.Errorf("failed to create target session: %w", err))
+		return
+	}
+	defer targetSession.Close()
+	state.SetTargetSession(targetSession)
+	defer func() {
+		state.SetTargetSession(nil)
+	}()
+
+	if _, err := targetSession.SendRequest("subsystem", true, ssh.Marshal(struct{ Name string }{Name: "sftp"})); err != nil {
+		fail(fmt.Errorf("failed to start SFTP subsystem on target: %w", err))
+		return
+	}
+
+	stdinPipe, err := targetSession.StdinPipe()
+	if err != nil {
+		fail(fmt.Errorf("failed to open target stdin pipe: %w", err))
+		return
+	}
+	stdoutPipe, err := targetSession.StdoutPipe()
+	if err != nil {
+		fail(fmt.Errorf("failed to open target stdout pipe: %w", err))
+		return
+	}
+
+	state.SessionStart = time.Now()
+	types.LogInfo("SFTP session started: client=%s target=%s", state.ClientUserValue(), formatTargetAddress(targetUser, targetHost, targetPort))
+	auditEvent(state, auditpkg.Event{
+		Event:      "session_start",
+		User:       state.ClientUserValue(),
+		TargetUser: targetUser,
+		TargetHost: targetHost,
+		TargetPort: targetPort,
+		Result:     "success",
+		Reason:     "sftp",
+	})
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(stdinPipe, channel)
+		_ = stdinPipe.Close()
+	}()
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(channel, stdoutPipe)
+	}()
+	wg.Wait()
+
+	types.LogInfo("SFTP session ended: client=%s target=%s", state.ClientUserValue(), formatTargetAddress(targetUser, targetHost, targetPort))
+	auditEvent(state, auditpkg.Event{
+		Event:       "session_end",
+		User:        state.ClientUserValue(),
+		TargetUser:  targetUser,
+		TargetHost:  targetHost,
+		TargetPort:  targetPort,
+		Result:      "success",
+		Reason:      "sftp",
+		DurationSec: sessionDuration(state),
+	})
+	recordSessionResult(state, "success")
+	sendExitStatus(channel, 0)
+	closeClientSession(channel, state)
+}
+
+// auditEvent emits an audit event, filling in correlation fields from the
+// session state when available.
+func auditEvent(state *types.SessionState, e auditpkg.Event) {
+	if state == nil {
+		return
+	}
+	if e.SessionID == "" {
+		e.SessionID = state.SessionID
+	}
+	if e.User == "" {
+		e.User = state.ClientUserValue()
+	}
+	if e.ClientAddr == "" && state.ClientConnValue() != nil {
+		e.ClientAddr = state.ClientConnValue().RemoteAddr().String()
+	}
+	if state.Audit != nil {
+		state.Audit.Log(e)
+	}
+}
+
+// auditSessionEnd emits a session_end audit event for sessions that never
+// reached the target (denied or failed before proxying started).
+func auditSessionEnd(state *types.SessionState, result string, exitStatus int, cause error) {
+	if state == nil {
+		return
+	}
+	targetUser, targetHost, targetPort := state.Target()
+	e := auditpkg.Event{
+		Event:       "session_end",
+		User:        state.ClientUserValue(),
+		Key:         clientKeyFingerprint(state),
+		TargetUser:  targetUser,
+		TargetHost:  targetHost,
+		TargetPort:  targetPort,
+		SSOResult:   state.SSOResultValue(),
+		RecordingID: state.RecordingIDValue(),
+		Result:      result,
+		ExitStatus:  auditpkg.Int(exitStatus),
+	}
+	if cause != nil {
+		e.Reason = cause.Error()
+	}
+	auditEvent(state, e)
+}
+
+// recordSessionResult records the proxied session result in Prometheus,
+// including the per-target series when a target is known.
+func recordSessionResult(state *types.SessionState, result string) {
+	appmetrics.Default().RecordProxySession(result)
+	if state == nil {
+		return
+	}
+	_, targetHost, targetPort := state.Target()
+	if targetHost == "" {
+		return
+	}
+	appmetrics.Default().RecordProxySessionForTarget(result, net.JoinHostPort(targetHost, targetPort))
+}
+
+func sessionDuration(state *types.SessionState) float64 {
+	if state == nil || state.SessionStart.IsZero() {
+		return 0
+	}
+	return time.Since(state.SessionStart).Seconds()
+}
+
+// clientKeyFingerprint returns the SHA-256 fingerprint of the client's public
+// key, so session lifecycle audit events carry the same identity proof as
+// auth_success without requiring correlation.
+func clientKeyFingerprint(state *types.SessionState) string {
+	if state == nil || state.ClientKeyValue() == nil {
+		return ""
+	}
+	return ssh.FingerprintSHA256(state.ClientKeyValue())
 }
 
 func buildRecordingFileName(targetUser, targetHost, targetPort, recordingID, recordingFormat string) string {

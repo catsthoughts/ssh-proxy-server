@@ -15,15 +15,25 @@ It accepts SSH connections with public key authentication, can either auto-accep
 ## Features
 
 - **Authorized Client Access**: Accept client keys automatically by default, or enforce checks against the file configured in `authorized_keys`
+- **Target ACL (FR-1)**: `access_control` restricts which targets each authenticated SSH user may reach, with `host[:port]` glob patterns (`web-*.prod`, `10.0.*`, `*`), CIDR ranges (`10.0.0.0/8`), SSO-group rules, and an allow/deny default
 - **SSH Agent Reuse**: Requires forwarded agent access via `ssh -A` for target authentication
 - **Certificate Support**: Supports SSH certificate-based authentication with `TrustedUserCAKeys` configuration - see **[CERTIFICATES.md](CERTIFICATES.md)** for setup examples
 - **Session Recording**: Records proxied terminal activity in either `asciinema` (`.cast`) or plain `script` transcript (`.log`) format with private file permissions for audit and analysis
+- **Recording Retention & Integrity**: `recordings.retention_days` expires old recordings automatically; `recordings.integrity` writes a SHA-256 `.sha256` sidecar for every finished recording
+- **Structured JSON Audit Log (FR-2)**: Emits one JSON object per event on stdout (`auth_success`, `auth_failure`, `target_denied`, `session_start`, `session_end`, `sso_success`, `sso_failure`, `handshake_rate_limited`) with who/where/result/recording_id fields, ready for journald → Loki → Alertmanager
+- **Hot Reload (FR-3)**: `SIGHUP` or an fsnotify change to the config file reloads settings for new connections without breaking active sessions; `authorized_keys` is re-read on every authentication
+- **Secret Indirection (FR-4)**: `sso.client_secret` supports `{"$env": "VAR"}` / `{"$file": "/path"}` (or the `"$env:VAR"` / `"$file:/path"` string forms) so secrets never live as plaintext in the canonical config
+- **Ed25519 Host Key**: New host keys are generated as Ed25519; existing RSA host keys keep working
+- **Handshake Rate Limiting**: `rate_limit` caps SSH handshakes per source IP per minute
+- **Centralized known_hosts**: `known_hosts` points the proxy at a managed target host-key file instead of `~/.ssh/known_hosts`
 - **Terminal-Only by Default**: Accepts interactive `shell` sessions out of the box; direct `exec` requests stay disabled unless `allow_direct_commands` is enabled in the JSON config
+- **Optional SFTP Subsystem (gated)**: `sftp_enabled` allows proxying the `sftp` subsystem to the target (binary stream, not recorded)
 - **Dynamic or Static Routing**: Use `LC_SSH_SERVER=host[:port]` or enable `static_routing` with failover / round-robin
 - **Transparent Proxying**: Acts as an intermediate SSH server and opens a real target SSH session
-- **Host Key Verification**: Requires `~/.ssh/known_hosts` by default, with an explicit insecure override for development only via `insecure_ignore_hostkey` in the JSON config
-- **Optional SSO Second Factor**: Can print a Keycloak verification link to the SSH console and wait for approval before proxying the session
-- **Prometheus Metrics**: Can expose `/metrics` using `prometheus/client_golang` for scraping by Prometheus
+- **Host Key Verification**: Requires `~/.ssh/known_hosts` (or the configured `known_hosts` file) by default, with an explicit insecure override for development only via `insecure_ignore_hostkey` in the JSON config
+- **Optional SSO Second Factor**: Can print a Keycloak verification link to the SSH console and wait for approval before proxying the session, with optional `required_groups` membership check
+- **Health Endpoint**: `health.enabled` exposes `GET /healthz` returning `{"status":"ok"}`
+- **Prometheus Metrics**: Can expose `/metrics` using `prometheus/client_golang` for scraping by Prometheus, including per-target session counters
 - **Configurable Logging**: Supports `error`, `info`, and `debug` log levels
 
 ## Requirements
@@ -119,16 +129,46 @@ Key JSON settings:
 - `retries` and `connect_timeout_seconds` — global target connection retry/timeout settings for both dynamic and static routing
 - `static_routing.enabled` — when `true`, the proxy ignores `LC_SSH_SERVER` and uses the configured `servers` list
 - `static_routing.mode` — `failover` or `round_robin`
+- `access_control.enabled` — enforces the per-user target ACL (FR-1); when disabled any authenticated client may reach any target
+- `access_control.default` — `deny` (default) or `allow` for users without a matching rule
+- `access_control.rules` — list of `{"user": "name-or-glob", "groups": ["sso-group"], "targets": [...]}` entries; a rule applies when its `user` pattern matches the SSH login user or the client belongs to one of `groups` (SSO groups, case-insensitive; `user` may be omitted when `groups` is set). Targets may be `host[:port]` glob patterns (`web-*.prod`, `10.0.*`, `*`) or CIDR ranges (`10.0.0.0/8`); a pattern without a port matches the default SSH port 22 only. The SSH login user is always used for the ACL decision — an explicitly requested different target user (`other@host`) does not affect it
+- `known_hosts` — path to a centralized target host-key file; empty (default) falls back to `~/.ssh/known_hosts`
+- `sftp_enabled` — allows proxying the `sftp` subsystem to the target (default `false`)
+- `rate_limit.enabled` / `rate_limit.max_per_minute` — caps inbound SSH handshakes per source IP per minute
+- `health.enabled` / `health.listen` / `health.path` — lightweight HTTP health endpoint for load balancers/orchestrators
+- `recordings.retention_days` — automatically deletes recordings (and their `.sha256` sidecars) older than this many days; `0` (default) keeps everything
+- `recordings.integrity` — writes a SHA-256 `.sha256` sidecar file next to every finished recording
 - `metrics.enabled` — enables the Prometheus metrics endpoint
 - `metrics.listen` and `metrics.path` — where to expose the scrape endpoint (for example `127.0.0.1:9090` and `/metrics`)
 - `sso.enabled` — enables a second-factor confirmation step before the SSH session is proxied
 - `sso.provider` — currently supports `keycloak`
-- `sso.client_secret` — optional; set it when the Keycloak client is confidential
+- `sso.client_secret` — optional; set it when the Keycloak client is confidential. Supports secret indirection: `{"$env": "VAR_NAME"}`, `{"$file": "/path/to/secret"}`, `"$env:VAR_NAME"`, or `"$file:/path/to/secret"` so the secret is not stored in plaintext
+- `sso.required_groups` — optional list of Keycloak groups (or realm roles) the confirmed identity must belong to
 - `sso.auth_timeout_seconds` — how long to wait for approval in the browser before rejecting the SSH session
 - `sso.poll_interval_seconds` — how often the proxy re-checks Keycloak for approval status
 - `sso.connect_timeout_seconds` — per-request timeout for discovery, device authorization, and polling calls to Keycloak
 - `sso.enforce_ssh_user_match` — defaults to `true`; require the confirmed Keycloak identity to match the SSH username, set to `false` to disable this check
 - `sso.insecure_skip_verify` — defaults to `false`; set to `true` to skip TLS certificate verification for self-signed certificates on the Keycloak server
+
+### Hot reload
+
+Send `SIGHUP` to the proxy process (or save the config file — including atomic save-by-rename as done by vim — changes are picked up via fsnotify):
+
+```bash
+kill -HUP $(pidof ssh-proxy-server)
+```
+
+The config, ACL, trusted CA certificates, log level, and rate limit are rebuilt for **new** connections. Active sessions keep the settings they started with and are not interrupted. `authorized_keys` is re-read on every authentication attempt.
+
+### Audit log
+
+Every security-relevant event is emitted as one JSON object per line on stdout, designed for a journald → Loki → Alertmanager pipeline:
+
+```json
+{"ts":"2026-11-21T12:50:58Z","event":"session_end","level":"info","session_id":"...","user":"alice","client_addr":"10.1.2.3:51620","target_user":"alice","target_host":"localhost","target_port":"2298","recording_id":"...","result":"success","exit_status":0,"duration_s":42.5}
+```
+
+Event types: `auth_success`, `auth_failure`, `target_denied`, `session_start`, `session_end`, `sso_success`, `sso_failure`, `handshake_rate_limited`. `session_start`/`session_end` carry `key_fingerprint` (client key) and `sso_result` (`success`/`failure`/`not_required`), so each session is fully described by its lifecycle events; the `auth_*`/`sso_*` stream correlates to them via `session_id`. Every event carries a `level` field (`info`, or `warning` for `denied`/`failure` results) so Loki/Alertmanager can filter and alert on severity. Regular (non-JSON) diagnostics stay in the same stdout stream; filter lines starting with `{` for the audit stream. Environment variable values from SendEnv are never logged (they may carry client tokens).
 
 You can store recordings in a custom directory by setting `"recordings_dir": "/path/to/recordings"` in the JSON config.
 
@@ -347,23 +387,35 @@ asciinema play recordings/<file>.cast
 ```
 cmd/
 └── ssh-proxy-server/
-    └── main.go              # Entry point and server initialization
+    └── main.go              # Entry point, hot reload (SIGHUP/fsnotify), health & retention
 internal/
+├── access/
+│   └── access.go            # Target ACL: per-user target patterns (FR-1)
 ├── appconfig/
-│   └── config.go            # JSON config loading, defaults, validation
+│   ├── config.go            # JSON config loading, defaults, validation, secret resolution
+│   └── config_secrets_test.go
+├── audit/
+│   └── audit.go             # Structured JSON audit log on stdout (FR-2)
 ├── client/
 │   └── client.go            # Target host connection and agent forwarding
+├── configwatch/
+│   └── configwatch.go       # fsnotify watcher with debounce (FR-3)
 ├── hostkey/
-│   └── hostkey.go           # Host key generation and loading
+│   └── hostkey.go           # Ed25519 host key generation/loading (RSA supported)
 ├── metrics/
 │   └── metrics.go           # Prometheus metrics collector and HTTP handler
+├── ratelimit/
+│   └── limiter.go           # Per-source-IP SSH handshake rate limiter
 ├── recording/
-│   └── recording.go         # Asciinema v2 and script format recording
+│   ├── recording.go         # Asciinema v2 and script format recording
+│   └── retention.go         # SHA-256 integrity sidecars + retention cleanup
+├── secrets/
+│   └── secrets.go           # $env/$file secret indirection (FR-4)
 ├── server/
 │   ├── security.go          # Client key authorization (authorized_keys)
-│   └── server.go            # SSH server, channel handling, target routing
+│   └── server.go            # SSH server, channel handling, ACL/audit wiring, SFTP
 ├── sso/
-│   └── sso.go               # OAuth2 device flow (Keycloak SSO/2FA)
+│   └── sso.go               # OAuth2 device flow (Keycloak SSO/2FA, group check)
 └── types/
     └── types.go             # SessionState, logging, shared types
 ```
@@ -373,6 +425,7 @@ internal/
 - `golang.org/x/crypto/ssh` - SSH protocol implementation and agent/known_hosts support
 - `github.com/google/uuid` - Session and recording ID generation
 - `github.com/prometheus/client_golang` - Prometheus metrics export
+- `github.com/fsnotify/fsnotify` - Config file watching for hot reload
 
 ## Documentation
 

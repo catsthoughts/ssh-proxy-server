@@ -75,12 +75,18 @@ func authMethodForClient(state *types.SessionState) (ssh.AuthMethod, error) {
 }
 
 func getHostKeyCallback(state *types.SessionState) (ssh.HostKeyCallback, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve home directory: %w", err)
+	knownHostsPath := ""
+	if state != nil {
+		knownHostsPath = strings.TrimSpace(state.KnownHosts)
+	}
+	if knownHostsPath == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve home directory: %w", err)
+		}
+		knownHostsPath = filepath.Join(homeDir, ".ssh", "known_hosts")
 	}
 
-	knownHostsPath := filepath.Join(homeDir, ".ssh", "known_hosts")
 	callback, err := knownhosts.New(knownHostsPath)
 	if err == nil && !hostKeyVerificationDisabled(state) {
 		return callback, nil
@@ -181,6 +187,7 @@ func GetSSHAgentConn(state *types.SessionState) (agent.Agent, error) {
 		agentChannel, requests, err := state.ClientConnValue().OpenChannel("auth-agent@openssh.com", nil)
 		if err == nil {
 			go ssh.DiscardRequests(requests)
+			state.SetAgentChannel(agentChannel)
 			return agent.NewClient(agentChannel), nil
 		}
 		return nil, fmt.Errorf("forwarded SSH agent could not be opened: %w", err)
